@@ -1,0 +1,96 @@
+/* =========================================
+   FULFILLMENT CONTROL
+========================================= */
+
+.fulfillmentControl {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 125px;
+}
+
+.fulfillmentSelect {
+  width: 100%;
+  height: 34px;
+  border: 1px solid #e6d5dc;
+  border-radius: 9px;
+  background: #ffffff;
+  padding: 0 9px;
+  color: #58414a;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 800;
+  outline: none;
+  cursor: pointer;
+  transition: 0.2s ease;
+}
+
+.fulfillmentSelect:hover {
+  border-color: #d99ab1;
+}
+
+.fulfillmentSelect:focus {
+  border-color: #cf7998;
+  box-shadow:
+    0 0 0 3px
+    rgba(207, 121, 152, 0.1);
+}
+
+.fulfillmentSelect[data-status="PENDING"] {
+  background: #fff8e9;
+  color: #a96e16;
+  border-color: #f0d9a6;
+}
+
+.fulfillmentSelect[data-status="PROCESSING"] {
+  background: #f2efff;
+  color: #6958bd;
+  border-color: #d8d1f7;
+}
+
+.fulfillmentSelect[data-status="SHIPPED"] {
+  background: #edf7ff;
+  color: #3376a8;
+  border-color: #cde5f7;
+}
+
+.fulfillmentSelect[data-status="DELIVERED"] {
+  background: #eaf8f3;
+  color: #2c8269;
+  border-color: #cbe9df;
+}
+
+.fulfillmentSelect[data-status="CANCELLED"] {
+  background: #fff0f1;
+  color: #b84f5b;
+  border-color: #f0ced2;
+}
+
+.fulfillmentSelect:disabled {
+  opacity: 0.65;
+  cursor: wait;
+}
+
+.savingText {
+  color: #9c828c;
+  font-size: 9px;
+}
+
+.statusError {
+  max-width: 180px;
+  color: #b84f5b;
+  font-size: 9px;
+  line-height: 1.3;
+}
+
+@media (max-width: 700px) {
+  .fulfillmentControl {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .fulfillmentSelect {
+    height: 38px;
+    font-size: 11px;
+  }
+}

@@ -1,0 +1,116 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../app/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  CUSTOMER
+  ADMIN
+}
+
+model User {
+  id           String    @id @default(cuid())
+  name         String
+  email        String    @unique
+  passwordHash String
+  role         Role      @default(CUSTOMER)
+  phone        String?
+  address      String?
+  city         String?
+  state        String?
+  orders       Order[]
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
+
+model Product {
+  id          String      @id @default(cuid())
+  slug        String      @unique
+  name        String
+  category    String
+  description String
+  price       Int
+  image       String
+  featured      Boolean     @default(false)
+  stock         Int         @default(0)
+  reservedStock Int         @default(0)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  orderItems    OrderItem[]
+}
+
+model Order {
+  id               String   @id @default(cuid())
+  customer         String
+  email            String
+  phone            String
+  address          String
+
+  // Payment status
+  status           String
+
+  // Order fulfillment status
+  fulfillmentStatus String @default("PENDING")
+
+  total            Int
+  userId           String?
+
+  paymentReference String?
+  paymentChannel   String?
+  paidAt           DateTime?
+  inventoryStatus     String   @default("NONE")
+  reservationExpiresAt DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  user       User?       @relation(fields: [userId], references: [id])
+  orderItems OrderItem[]
+}
+model OrderItem {
+  id        String  @id @default(cuid())
+  orderId   String
+  productId String
+  quantity  Int
+  price     Int
+  order     Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product   Product @relation(fields: [productId], references: [id])
+}
+
+model ContactMessage {
+  id        String   @id @default(cuid())
+  name      String
+  email     String
+  subject   String
+  message   String
+  createdAt DateTime @default(now())
+}
+
+model Promotion {
+  id          String   @id @default(cuid())
+  title       String
+  subtitle    String?
+  description String?
+  image       String?
+  ctaLabel    String   @default("Shop now")
+  ctaHref     String   @default("/shop")
+  placement   String   @default("HOME")
+  isActive    Boolean  @default(false)
+  sortOrder   Int      @default(0)
+  startsAt    DateTime?
+  endsAt      DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([placement, isActive, sortOrder])
+  @@index([startsAt, endsAt])
+}
+
+model NewsletterSubscriber {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  createdAt DateTime @default(now())
+}

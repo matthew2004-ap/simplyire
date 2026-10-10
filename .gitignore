@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Next.js output
+.next/
+out/
+
+# Secrets and local environment
+.env
+.env.local
+.env.*.local
+.env.*
+!.env.example
+
+# Vercel
+.vercel/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# TypeScript
+*.tsbuildinfo
+
+# Local tooling
+.kilo/
+
+# Prisma Client generated from prisma/schema.prisma
+app/generated/prisma/
