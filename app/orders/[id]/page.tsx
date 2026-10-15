@@ -4,6 +4,8 @@ import { notFound, redirect } from "next/navigation";
 import { getSession } from "@/lib/auth";
 import { db } from "@/lib/db";
 import styles from "./page.module.css";
+import OrderStatusRefresh from "./OrderStatusRefresh";
+export const dynamic = "force-dynamic";
 
 export const metadata: Metadata = { title: "Order Details", robots: { index: false, follow: false } };
 
@@ -115,13 +117,25 @@ export default async function CustomerOrderDetailsPage({ params }: PageProps) {
           <div className={styles.mainColumn}>
             <section className={styles.panel}>
               <div className={styles.panelHeading}>
-                <div>
-                  <span className={styles.panelEyebrow}>Delivery progress</span>
-                  <h2>Track your order</h2>
-                  <p>We&apos;ll update this timeline as your order moves through the store.</p>
-                </div>
-                <span className={paymentClass(order.status)}>Payment: {order.status}</span>
-              </div>
+  <div>
+    <span className={styles.panelEyebrow}>
+      Delivery progress
+    </span>
+
+    <h2>Track your order</h2>
+
+    <p>
+      Follow your order from confirmation
+      through delivery.
+    </p>
+
+    <OrderStatusRefresh />
+  </div>
+
+  <span className={paymentClass(order.status)}>
+    Payment: {order.status}
+  </span>
+</div>
 
               {isCancelled ? (
                 <div className={styles.cancelledNotice}>This order has been cancelled. Contact Simplyire if you need help with this order.</div>
