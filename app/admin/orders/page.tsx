@@ -39,13 +39,19 @@ function formatNaira(amount: number) {
 }
 
 function formatDate(date: string) {
+  const parsedDate = new Date(date);
+
+  if (!Number.isFinite(parsedDate.getTime())) {
+    return "Date unavailable";
+  }
+
   return new Intl.DateTimeFormat("en-NG", {
     day: "numeric",
     month: "short",
     year: "numeric",
     hour: "2-digit",
     minute: "2-digit",
-  }).format(new Date(date));
+  }).format(parsedDate);
 }
 
 function shortOrderId(id: string) {
@@ -71,27 +77,6 @@ function getPaymentClass(status: string) {
   }
 }
 
-function getFulfillmentClass(status: string) {
-  switch (status.toUpperCase()) {
-    case "PENDING":
-      return "order-badge order-badge-pending";
-
-    case "PROCESSING":
-      return "order-badge order-badge-processing";
-
-    case "SHIPPED":
-      return "order-badge order-badge-shipped";
-
-    case "DELIVERED":
-      return "order-badge order-badge-delivered";
-
-    case "CANCELLED":
-      return "order-badge order-badge-cancelled";
-
-    default:
-      return "order-badge";
-  }
-}
 
 export default function AdminOrdersPage() {
   const [orders, setOrders] = useState<Order[]>([]);
@@ -151,6 +136,12 @@ export default function AdminOrdersPage() {
         );
       }
 
+      if (!Array.isArray(data.orders)) {
+        throw new Error(
+          "The server returned an invalid orders response."
+        );
+      }
+
       setOrders(data.orders);
     } catch (error) {
       setError(
@@ -170,52 +161,79 @@ export default function AdminOrdersPage() {
   }, []);
 
   const filteredOrders = useMemo(() => {
-    const query = search
-      .trim()
-      .toLowerCase();
+    const query = search.trim().toLowerCase();
 
     return orders.filter((order) => {
+      const searchableValues = [
+        order.customer,
+        order.email,
+        order.phone,
+        order.id,
+        order.paymentReference ?? "",
+      ];
+
       const matchesSearch =
         !query ||
-        order.customer
-          .toLowerCase()
-          .includes(query) ||
-        order.email
-          .toLowerCase()
-          .includes(query) ||
-        order.id
-          .toLowerCase()
-          .includes(query);
+        searchableValues.some((value) =>
+          value.toLowerCase().includes(query)
+        );
 
-      const matchesFilter =
-        filter === "ALL" ||
-        order.status === filter ||
-        order.fulfillmentStatus ===
-          filter;
+      const paymentStatus = order.status.toUpperCase();
+      const fulfillmentStatus = order.fulfillmentStatus.toUpperCase();
 
-      return (
-        matchesSearch &&
-        matchesFilter
-      );
+      let matchesFilter = filter === "ALL";
+
+      switch (filter) {
+        case "PAYMENT_PENDING":
+          matchesFilter = paymentStatus === "PENDING";
+          break;
+        case "PAYMENT_PAID":
+          matchesFilter = paymentStatus === "PAID";
+          break;
+        case "PAYMENT_FAILED":
+          matchesFilter = paymentStatus === "FAILED";
+          break;
+        case "FULFILLMENT_PENDING":
+          matchesFilter = fulfillmentStatus === "PENDING";
+          break;
+        case "PROCESSING":
+          matchesFilter = fulfillmentStatus === "PROCESSING";
+          break;
+        case "SHIPPED":
+          matchesFilter = fulfillmentStatus === "SHIPPED";
+          break;
+        case "DELIVERED":
+          matchesFilter = fulfillmentStatus === "DELIVERED";
+          break;
+        case "CANCELLED":
+          matchesFilter = fulfillmentStatus === "CANCELLED";
+          break;
+        default:
+          break;
+      }
+
+      return matchesSearch && matchesFilter;
     });
   }, [orders, search, filter]);
 
   const paidOrders = orders.filter(
-    (order) => order.status === "PAID"
+    (order) => order.status.toUpperCase() === "PAID"
   ).length;
 
-  const pendingOrders = orders.filter(
+  const pendingPaymentOrders = orders.filter(
+    (order) => order.status.toUpperCase() === "PENDING"
+  ).length;
+
+  // Only paid orders should count as ready for fulfillment.
+  const pendingFulfillmentOrders = orders.filter(
     (order) =>
-      order.fulfillmentStatus ===
-      "PENDING"
+      order.status.toUpperCase() === "PAID" &&
+      order.fulfillmentStatus.toUpperCase() === "PENDING"
   ).length;
 
-  const deliveredOrders =
-    orders.filter(
-      (order) =>
-        order.fulfillmentStatus ===
-        "DELIVERED"
-    ).length;
+  const deliveredOrders = orders.filter(
+    (order) => order.fulfillmentStatus.toUpperCase() === "DELIVERED"
+  ).length;
 
   return (
     <>
@@ -268,6 +286,19 @@ export default function AdminOrdersPage() {
 
               <div className="orders-stat">
                 <div className="orders-stat-icon">
+                  ⏳
+                </div>
+
+                <div>
+                  <span>Pending Payments</span>
+                  <strong>
+                    {pendingPaymentOrders}
+                  </strong>
+                </div>
+              </div>
+
+              <div className="orders-stat">
+                <div className="orders-stat-icon">
                   💳
                 </div>
 
@@ -287,7 +318,7 @@ export default function AdminOrdersPage() {
                 <div>
                   <span>Pending Fulfillment</span>
                   <strong>
-                    {pendingOrders}
+                    {pendingFulfillmentOrders}
                   </strong>
                 </div>
               </div>
@@ -334,7 +365,7 @@ export default function AdminOrdersPage() {
 
                     <input
                       type="search"
-                      placeholder="Search orders..."
+                      placeholder="Search name, phone, order ID, or reference..."
                       value={search}
                       onChange={(event) =>
                         setSearch(
@@ -357,29 +388,35 @@ export default function AdminOrdersPage() {
                       All orders
                     </option>
 
-                    <option value="PAID">
-                      Paid
-                    </option>
+                    <optgroup label="Payment status">
+                      <option value="PAYMENT_PENDING">
+                        Payment pending
+                      </option>
+                      <option value="PAYMENT_PAID">
+                        Paid
+                      </option>
+                      <option value="PAYMENT_FAILED">
+                        Payment failed
+                      </option>
+                    </optgroup>
 
-                    <option value="PENDING">
-                      Pending
-                    </option>
-
-                    <option value="PROCESSING">
-                      Processing
-                    </option>
-
-                    <option value="SHIPPED">
-                      Shipped
-                    </option>
-
-                    <option value="DELIVERED">
-                      Delivered
-                    </option>
-
-                    <option value="CANCELLED">
-                      Cancelled
-                    </option>
+                    <optgroup label="Fulfillment status">
+                      <option value="FULFILLMENT_PENDING">
+                        Awaiting fulfillment
+                      </option>
+                      <option value="PROCESSING">
+                        Processing
+                      </option>
+                      <option value="SHIPPED">
+                        Shipped
+                      </option>
+                      <option value="DELIVERED">
+                        Delivered
+                      </option>
+                      <option value="CANCELLED">
+                        Cancelled
+                      </option>
+                    </optgroup>
                   </select>
                 </div>
               </div>
@@ -938,13 +975,25 @@ export default function AdminOrdersPage() {
                   {selectedOrder.paymentReference && (
                     <div>
                       <span>
-                        Reference
+                        Payment Reference
                       </span>
 
                       <strong>
                         {
                           selectedOrder.paymentReference
                         }
+                      </strong>
+                    </div>
+                  )}
+
+                  {selectedOrder.paidAt && (
+                    <div>
+                      <span>
+                        Paid At
+                      </span>
+
+                      <strong>
+                        {formatDate(selectedOrder.paidAt)}
                       </strong>
                     </div>
                   )}

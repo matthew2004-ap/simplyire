@@ -7,10 +7,8 @@ type Props = {
   orderId: string;
   value: string;
   paymentStatus: string;
-  onUpdated: (
-    orderId: string,
-    status: string
-  ) => void;
+  paymentReference?: string | null;
+  onUpdated: (orderId: string, status: string) => void;
 };
 
 const statuses = [
@@ -19,7 +17,7 @@ const statuses = [
   "SHIPPED",
   "DELIVERED",
   "CANCELLED",
-];
+] as const;
 
 const rank: Record<string, number> = {
   PENDING: 0,
@@ -32,56 +30,49 @@ export default function FulfillmentStatusSelect({
   orderId,
   value,
   paymentStatus,
+  paymentReference = null,
   onUpdated,
 }: Props) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
-  async function updateStatus(
-    newStatus: string
-  ) {
-    if (newStatus === value) {
-      return;
-    }
+  async function updateStatus(newStatus: string) {
+    if (newStatus === value || saving) return;
 
     try {
       setSaving(true);
       setError("");
 
-      const response = await fetch(
-        "/api/admin/orders",
-        {
-          method: "PATCH",
-          headers: {
-            "Content-Type":
-              "application/json",
-          },
-          body: JSON.stringify({
-            id: orderId,
-            fulfillmentStatus:
-              newStatus,
-          }),
-        }
-      );
+      const response = await fetch("/api/admin/orders", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: orderId,
+          fulfillmentStatus: newStatus,
+        }),
+      });
 
-      const data = await response.json();
+      const data = await response.json().catch(() => null);
+      const savedStatus = data?.order?.fulfillmentStatus;
 
-      if (!response.ok || !data.success) {
+      if (
+        !response.ok ||
+        !data?.success ||
+        typeof savedStatus !== "string"
+      ) {
         throw new Error(
-          data.message ||
-            "Failed to update status."
+          typeof data?.message === "string"
+            ? data.message
+            : "Failed to update status. Please try again."
         );
       }
 
-      onUpdated(
-        orderId,
-        data.order.fulfillmentStatus
-      );
+      onUpdated(orderId, savedStatus);
     } catch (error) {
       setError(
         error instanceof Error
           ? error.message
-          : "Failed to update status."
+          : "Failed to update status. Please try again."
       );
     } finally {
       setSaving(false);
@@ -94,43 +85,51 @@ export default function FulfillmentStatusSelect({
         value={value}
         disabled={saving}
         data-status={value}
-        className={
-          styles.fulfillmentSelect
-        }
-        onChange={(event) =>
-          updateStatus(
-            event.target.value
-          )
-        }
+        className={styles.fulfillmentSelect}
+        aria-label={`Fulfillment status for order ${orderId}`}
+        onChange={(event) => updateStatus(event.target.value)}
       >
         {statuses.map((status) => {
-          const isPaid =
-            paymentStatus === "PAID";
+          const isPaid = paymentStatus === "PAID";
+          const isProgressStatus = [
+            "PROCESSING",
+            "SHIPPED",
+            "DELIVERED",
+          ].includes(status);
 
-          const isProgressStatus =
-            [
-              "PROCESSING",
-              "SHIPPED",
-              "DELIVERED",
-            ].includes(status);
-
+          const currentRank = rank[value];
+          const targetRank = rank[status];
           const isBackward =
-            rank[status] !== undefined &&
-            rank[value] !== undefined &&
-            rank[status] < rank[value];
+            value !== "CANCELLED" &&
+            status !== "CANCELLED" &&
+            currentRank !== undefined &&
+            targetRank !== undefined &&
+            targetRank < currentRank;
+
+          const cannotReopenCancelled =
+            value === "CANCELLED" && status !== "CANCELLED";
+          const paymentAttemptInProgress =
+            status === "CANCELLED" &&
+            paymentStatus === "PENDING" &&
+            Boolean(paymentReference);
 
           const cannotUse =
             isBackward ||
-            (isProgressStatus &&
-              !isPaid) ||
-            (status === "CANCELLED" &&
-              isPaid);
+            cannotReopenCancelled ||
+            (isProgressStatus && !isPaid) ||
+            (status === "CANCELLED" && isPaid) ||
+            paymentAttemptInProgress;
 
           return (
             <option
               key={status}
               value={status}
               disabled={cannotUse}
+              title={
+                paymentAttemptInProgress
+                  ? "Verify the payment attempt before cancelling this order."
+                  : undefined
+              }
             >
               {status}
             </option>
@@ -139,13 +138,11 @@ export default function FulfillmentStatusSelect({
       </select>
 
       {saving && (
-        <span className={styles.savingText}>
-          Saving...
-        </span>
+        <span className={styles.savingText}>Saving...</span>
       )}
 
       {error && (
-        <span className={styles.statusError}>
+        <span className={styles.statusError} role="alert">
           {error}
         </span>
       )}
