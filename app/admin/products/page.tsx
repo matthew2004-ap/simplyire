@@ -178,7 +178,18 @@ export default function AdminProductsPage() {
     });
   }, [products, search, category]);
 
-  const totalStock = products.reduce(
+  // Inventory summary: physical stock includes units currently reserved.
+  const totalPhysicalStock = products.reduce(
+    (sum, product) => sum + Math.max(0, product.stock),
+    0
+  );
+
+  const totalReservedStock = products.reduce(
+    (sum, product) => sum + Math.max(0, product.reservedStock ?? 0),
+    0
+  );
+
+  const totalAvailableStock = products.reduce(
     (sum, product) => sum + availableStock(product),
     0
   );
@@ -187,6 +198,10 @@ export default function AdminProductsPage() {
     const available = availableStock(product);
     return available > 0 && available <= 5;
   }).length;
+
+  const outOfStockCount = products.filter(
+    (product) => availableStock(product) <= 0
+  ).length;
 
   const featuredCount = products.filter(
     (product) => product.featured
@@ -390,8 +405,8 @@ export default function AdminProductsPage() {
 
               <p>
                 Manage your Simplyire
-                Essentials catalogue,
-                pricing and inventory.
+                Essentials catalogue, pricing,
+                stock reservations and availability.
               </p>
             </div>
 
@@ -412,90 +427,65 @@ export default function AdminProductsPage() {
         <div className={styles.container}>
           <div className={styles.statsGrid}>
             <div className={styles.statCard}>
-              <div
-                className={`${styles.statIcon} ${styles.pink}`}
-              >
-                📦
-              </div>
-
+              <div className={`${styles.statIcon} ${styles.pink}`}>📦</div>
               <div>
-                <span>
-                  Total Products
-                </span>
-
-                <strong>
-                  {products.length}
-                </strong>
-
-                <small>
-                  In catalogue
-                </small>
+                <span>Total Products</span>
+                <strong>{products.length}</strong>
+                <small>In catalogue</small>
               </div>
             </div>
 
             <div className={styles.statCard}>
-              <div
-                className={`${styles.statIcon} ${styles.green}`}
-              >
-                ✓
-              </div>
-
+              <div className={`${styles.statIcon} ${styles.green}`}>▣</div>
               <div>
-                <span>
-                  Total Stock
-                </span>
-
-                <strong>
-                  {totalStock}
-                </strong>
-
-                <small>
-                  Items available
-                </small>
+                <span>Physical Stock</span>
+                <strong>{totalPhysicalStock}</strong>
+                <small>Units in inventory</small>
               </div>
             </div>
 
             <div className={styles.statCard}>
-              <div
-                className={`${styles.statIcon} ${styles.orange}`}
-              >
-                ⚠
-              </div>
-
+              <div className={`${styles.statIcon} ${styles.orange}`}>↗</div>
               <div>
-                <span>
-                  Low Stock
-                </span>
-
-                <strong>
-                  {lowStockCount}
-                </strong>
-
-                <small>
-                  5 or fewer units
-                </small>
+                <span>Reserved Stock</span>
+                <strong>{totalReservedStock}</strong>
+                <small>Held for pending orders</small>
               </div>
             </div>
 
             <div className={styles.statCard}>
-              <div
-                className={`${styles.statIcon} ${styles.purple}`}
-              >
-                ⭐
-              </div>
-
+              <div className={`${styles.statIcon} ${styles.green}`}>✓</div>
               <div>
-                <span>
-                  Featured
-                </span>
+                <span>Available Stock</span>
+                <strong>{totalAvailableStock}</strong>
+                <small>Units available to order</small>
+              </div>
+            </div>
 
-                <strong>
-                  {featuredCount}
-                </strong>
+            <div className={styles.statCard}>
+              <div className={`${styles.statIcon} ${styles.orange}`}>⚠</div>
+              <div>
+                <span>Low Stock</span>
+                <strong>{lowStockCount}</strong>
+                <small>Products with 1–5 available</small>
+              </div>
+            </div>
 
-                <small>
-                  Featured products
-                </small>
+            <div className={styles.statCard}>
+              <div className={`${styles.statIcon} ${styles.orange}`}>!</div>
+              <div>
+                <span>Out of Stock</span>
+                <strong>{outOfStockCount}</strong>
+                <small>Products unavailable to order</small>
+              </div>
+            </div>
+
+            <div className={styles.statCard}>
+              <div className={`${styles.statIcon} ${styles.purple}`}>⭐</div>
+              <div>
+                <span>Featured</span>
+                <strong>{featuredCount}</strong>
+                <small>Featured products</small>
               </div>
             </div>
           </div>
@@ -685,12 +675,10 @@ export default function AdminProductsPage() {
                         <th>
                           Price
                         </th>
-                        <th>
-                          Stock
-                        </th>
-                        <th>
-                          Featured
-                        </th>
+                        <th>Physical Stock</th>
+                        <th>Reserved</th>
+                        <th>Available</th>
+                        <th>Featured</th>
                         <th />
                       </tr>
                     </thead>
@@ -760,18 +748,28 @@ export default function AdminProductsPage() {
                             </td>
 
                             <td>
-                              <span
-                                className={getStockClass(
-                                  availableStock(product)
-                                )}
-                              >
+                              <strong>{product.stock}</strong>
+                              <small style={{ display: "block", marginTop: 4, color: "#9a858d", fontSize: 10 }}>
+                                Physical units
+                              </small>
+                            </td>
+
+                            <td>
+                              <strong>{Math.max(0, product.reservedStock ?? 0)}</strong>
+                              <small style={{ display: "block", marginTop: 4, color: "#9a858d", fontSize: 10 }}>
+                                Reserved units
+                              </small>
+                            </td>
+
+                            <td>
+                              <span className={getStockClass(availableStock(product))}>
                                 {availableStock(product) <= 0
                                   ? "Out of stock"
                                   : `${availableStock(product)} available`}
                               </span>
-                              {(product.reservedStock ?? 0) > 0 && (
-                                <small style={{ display: "block", marginTop: 4, color: "#9a858d", fontSize: 10 }}>
-                                  {product.reservedStock} reserved
+                              {availableStock(product) > 0 && availableStock(product) <= 5 && (
+                                <small style={{ display: "block", marginTop: 4, color: "#a65c22", fontSize: 10 }}>
+                                  Low-stock alert
                                 </small>
                               )}
                             </td>
@@ -892,25 +890,39 @@ export default function AdminProductsPage() {
                         </div>
 
                         <div
-                          className={
-                            styles.mobileMeta
-                          }
+                          style={{
+                            clear: "both",
+                            display: "grid",
+                            gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+                            gap: 8,
+                            paddingTop: 14,
+                          }}
                         >
-                          <span
-                            className={getStockClass(
-                              product.stock
-                            )}
-                          >
-                            {product.stock}{" "}
-                            in stock
+                          <div style={{ border: "1px solid #f0e3e8", borderRadius: 10, padding: "10px 8px" }}>
+                            <small style={{ display: "block", color: "#9b878e", fontSize: 10 }}>Physical</small>
+                            <strong style={{ display: "block", marginTop: 4 }}>{product.stock}</strong>
+                          </div>
+                          <div style={{ border: "1px solid #f0e3e8", borderRadius: 10, padding: "10px 8px" }}>
+                            <small style={{ display: "block", color: "#9b878e", fontSize: 10 }}>Reserved</small>
+                            <strong style={{ display: "block", marginTop: 4 }}>{Math.max(0, product.reservedStock ?? 0)}</strong>
+                          </div>
+                          <div style={{ border: "1px solid #f0e3e8", borderRadius: 10, padding: "10px 8px" }}>
+                            <small style={{ display: "block", color: "#9b878e", fontSize: 10 }}>Available</small>
+                            <strong style={{ display: "block", marginTop: 4 }}>{availableStock(product)}</strong>
+                          </div>
+                        </div>
+
+                        <div className={styles.mobileMeta}>
+                          <span className={getStockClass(availableStock(product))}>
+                            {availableStock(product) <= 0
+                              ? "Out of stock"
+                              : availableStock(product) <= 5
+                              ? "Low stock"
+                              : "In stock"}
                           </span>
 
                           {product.featured && (
-                            <span
-                              className={
-                                styles.featuredYes
-                              }
-                            >
+                            <span className={styles.featuredYes}>
                               ★ Featured
                             </span>
                           )}
