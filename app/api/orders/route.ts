@@ -20,7 +20,39 @@ type OrderRequest = {
 
 export async function POST(request: Request) {
   try {
-    const body = (await request.json()) as OrderRequest;
+    // --------------------------------------------------
+    // 1. PARSE AND VALIDATE REQUEST BODY
+    // --------------------------------------------------
+
+    let parsedBody: unknown;
+
+    try {
+      parsedBody = await request.json();
+    } catch {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Invalid request body.",
+        },
+        { status: 400 }
+      );
+    }
+
+    if (
+      !parsedBody ||
+      typeof parsedBody !== "object" ||
+      Array.isArray(parsedBody)
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Invalid order information.",
+        },
+        { status: 400 }
+      );
+    }
+
+    const body = parsedBody as OrderRequest;
 
     const {
       customer,
@@ -32,192 +64,362 @@ export async function POST(request: Request) {
       items,
     } = body;
 
-    const session = await getSession();
-    await maybeProcessExpiredReservations(10);
-
     // --------------------------------------------------
-    // 1. BASIC VALIDATION
+    // 2. VALIDATE CUSTOMER INFORMATION
     // --------------------------------------------------
 
     if (
-      !customer?.trim() ||
-      !email?.trim() ||
-      !phone?.trim() ||
-      !address?.trim() ||
+      typeof customer !== "string" ||
+      !customer.trim() ||
+      typeof email !== "string" ||
+      !email.trim() ||
+      typeof phone !== "string" ||
+      !phone.trim() ||
+      typeof address !== "string" ||
+      !address.trim()
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          message:
+            "Please provide your name, email, phone number, and delivery address.",
+        },
+        { status: 400 }
+      );
+    }
+
+    const normalizedEmail = email
+      .trim()
+      .toLowerCase();
+
+    const validEmail =
+      /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(
+        normalizedEmail
+      );
+
+    if (!validEmail) {
+      return NextResponse.json(
+        {
+          success: false,
+          message:
+            "Please provide a valid email address.",
+        },
+        { status: 400 }
+      );
+    }
+
+    if (
+      (city !== undefined &&
+        typeof city !== "string") ||
+      (state !== undefined &&
+        typeof state !== "string")
+    ) {
+      return NextResponse.json(
+        {
+          success: false,
+          message:
+            "City and state must be valid text values.",
+        },
+        { status: 400 }
+      );
+    }
+
+    // --------------------------------------------------
+    // 3. VALIDATE CART ITEMS
+    // --------------------------------------------------
+
+    if (
       !Array.isArray(items) ||
       items.length === 0
     ) {
       return NextResponse.json(
         {
           success: false,
-          message: "Please provide all required information.",
+          message:
+            "Your cart is empty. Add products before checking out.",
         },
         { status: 400 }
       );
     }
 
-    // --------------------------------------------------
-    // 2. VALIDATE CART ITEMS
-    // --------------------------------------------------
+    const validatedItems: OrderItemInput[] = [];
 
     for (const item of items) {
       if (
-        !item.productId ||
-        !Number.isInteger(item.quantity) ||
+        !item ||
+        typeof item.productId !== "string" ||
+        !item.productId.trim() ||
+        !Number.isSafeInteger(item.quantity) ||
         item.quantity <= 0
       ) {
         return NextResponse.json(
           {
             success: false,
-            message: "Invalid product quantity.",
+            message:
+              "One or more cart items have invalid product IDs or quantities.",
           },
           { status: 400 }
         );
       }
+
+      validatedItems.push({
+        productId: item.productId.trim(),
+        quantity: item.quantity,
+      });
     }
 
     // --------------------------------------------------
-    // 3. PREVENT DUPLICATE PRODUCTS
+    // 4. PREVENT DUPLICATE PRODUCTS
     // --------------------------------------------------
 
-    const productIds = items.map(
+    const productIds = validatedItems.map(
       (item) => item.productId
     );
 
-    const uniqueProductIds = new Set(productIds);
+    const uniqueProductIds = new Set(
+      productIds
+    );
 
-    if (uniqueProductIds.size !== productIds.length) {
+    if (
+      uniqueProductIds.size !==
+      productIds.length
+    ) {
       return NextResponse.json(
         {
           success: false,
           message:
-            "Duplicate products were found in the cart.",
+            "Duplicate products were found in your cart. Please update your cart and try again.",
         },
         { status: 400 }
       );
     }
+
+    // --------------------------------------------------
+    // 5. PROCESS EXPIRED RESERVATIONS
+    // --------------------------------------------------
+
+    /*
+     * Attempt to reconcile expired reservations before
+     * creating another order.
+     *
+     * If cleanup fails, continue safely. The atomic
+     * stock-reservation checks below still prevent
+     * overselling, though unreconciled reservations may
+     * temporarily make some stock unavailable.
+     */
+    try {
+      await maybeProcessExpiredReservations(10);
+    } catch (cleanupError) {
+      console.error(
+        "On-demand reservation cleanup failed:",
+        cleanupError
+      );
+    }
+
+    // --------------------------------------------------
+    // 6. GET CUSTOMER SESSION
+    // --------------------------------------------------
+
+    const session = await getSession();
+
+    /*
+     * Logged-in customers are associated with their
+     * authenticated user ID. Guest checkout remains
+     * supported.
+     */
+
+    // --------------------------------------------------
+    // 7. PREPARE ADDRESS AND RESERVATION EXPIRY
+    // --------------------------------------------------
+
+    const fullAddress = [
+      address.trim(),
+      city?.trim(),
+      state?.trim(),
+    ]
+      .filter(
+        (part): part is string =>
+          Boolean(part)
+      )
+      .join(", ");
+
     const reservationExpiresAt = new Date(
       Date.now() + 30 * 60 * 1000
     );
-    const fullAddress = [address.trim(), city?.trim(), state?.trim()]
-      .filter(Boolean)
-      .join(", ");
 
     // --------------------------------------------------
-    // 4. CREATE ORDER INSIDE A TRANSACTION
+    // 8. CREATE ORDER AND RESERVE STOCK
     // --------------------------------------------------
 
     const order = await db.$transaction(
       async (tx) => {
-        // Get products directly from PostgreSQL.
-        // Never trust product price or stock from the browser.
-        const products = await tx.product.findMany({
-          where: {
-            id: {
-              in: productIds,
+        /*
+         * Read authoritative product information
+         * from PostgreSQL, not the browser.
+         */
+        const products =
+          await tx.product.findMany({
+            where: {
+              id: {
+                in: productIds,
+              },
             },
-          },
-        });
+          });
 
-        // --------------------------------------------------
-        // 5. CHECK THAT ALL PRODUCTS EXIST
-        // --------------------------------------------------
-
-        if (products.length !== productIds.length) {
+        if (
+          products.length !==
+          productIds.length
+        ) {
           throw new Error(
             "One or more products are no longer available."
           );
         }
 
+        const productMap = new Map(
+          products.map((product) => [
+            product.id,
+            product,
+          ])
+        );
+
         let subtotal = 0;
 
-        // --------------------------------------------------
-        // 6. BUILD ORDER ITEMS
-        // --------------------------------------------------
+        // ----------------------------------------------
+        // BUILD ORDER ITEMS USING DATABASE PRICES
+        // ----------------------------------------------
 
-        const orderItems = items.map((item) => {
-          const product = products.find(
-            (product) => product.id === item.productId
-          );
+        const orderItems = validatedItems.map(
+          (item) => {
+            const product =
+              productMap.get(
+                item.productId
+              );
 
-          if (!product) {
-            throw new Error(
-              "A product could not be found."
-            );
+            if (!product) {
+              throw new Error(
+                "A product could not be found."
+              );
+            }
+
+            /*
+             * Physical stock includes reserved stock
+             * until the reservation is committed.
+             *
+             * Therefore:
+             * Available = stock - reservedStock
+             */
+            const availableStock =
+              Math.max(
+                0,
+                product.stock -
+                  product.reservedStock
+              );
+
+            if (
+              availableStock <
+              item.quantity
+            ) {
+              throw new Error(
+                `${product.name} does not have enough available stock. Only ${availableStock} is currently available.`
+              );
+            }
+
+            subtotal +=
+              product.price *
+              item.quantity;
+
+            return {
+              productId: product.id,
+              quantity: item.quantity,
+              price: product.price,
+            };
           }
+        );
 
-          // Check sellable inventory rather than physical stock.
-          const availableStock = Math.max(0, product.stock - product.reservedStock);
-          if (availableStock < item.quantity) {
-            throw new Error(
-              `${product.name} does not have enough available stock. Only ${availableStock} is available.`
-            );
-          }
-
-          // Use database price.
-          subtotal +=
-            product.price * item.quantity;
-
-          return {
-            productId: product.id,
-            quantity: item.quantity,
-            price: product.price,
-          };
-        });
-
-        // --------------------------------------------------
-        // 7. CALCULATE DELIVERY
-        // --------------------------------------------------
+        // ----------------------------------------------
+        // CALCULATE DELIVERY
+        // ----------------------------------------------
 
         const deliveryFee =
-          subtotal >= 50000 ? 0 : 2500;
+          subtotal >= 50000
+            ? 0
+            : 2500;
 
-        const total = subtotal + deliveryFee;
+        const total =
+          subtotal + deliveryFee;
 
-        // --------------------------------------------------
-        // 8. CREATE ORDER
-        // --------------------------------------------------
+        // ----------------------------------------------
+        // CREATE THE ORDER
+        // ----------------------------------------------
 
-        const createdOrder = await tx.order.create({
-          data: {
-            customer: customer.trim(),
-            email: email.trim(),
-            phone: phone.trim(),
-            address: fullAddress,
+        const createdOrder =
+          await tx.order.create({
+            data: {
+              customer:
+                customer.trim(),
 
-            status: "PENDING",
-            fulfillmentStatus: "PENDING",
+              email:
+                normalizedEmail,
 
-            total,
+              phone:
+                phone.trim(),
 
-            userId: session?.userId ?? null,
+              address:
+                fullAddress,
 
-            inventoryStatus: "RESERVED",
-            reservationExpiresAt,
+              status: "PENDING",
 
-            orderItems: {
-              create: orderItems,
+              fulfillmentStatus:
+                "PENDING",
+
+              total,
+
+              userId:
+                session?.userId ?? null,
+
+              inventoryStatus:
+                "RESERVED",
+
+              reservationExpiresAt,
+
+              orderItems: {
+                create: orderItems,
+              },
             },
-          },
-          include: {
-            orderItems: true,
-          },
-        });
 
-        // --------------------------------------------------
-        // 9. RESERVE STOCK
-        // --------------------------------------------------
+            include: {
+              orderItems: true,
+            },
+          });
 
-        for (const item of items) {
+        // ----------------------------------------------
+        // RESERVE STOCK ATOMICALLY
+        // ----------------------------------------------
+
+        /*
+         * Recheck available stock in PostgreSQL when
+         * reserving each product.
+         *
+         * This protects against another order reserving
+         * the same product after the initial stock read.
+         *
+         * If any reservation fails, throwing an error
+         * rolls back both the order and its reservations.
+         */
+        for (const item of validatedItems) {
           const result =
             await tx.$executeRaw`
               UPDATE "Product"
               SET
                 "reservedStock" =
-                  "reservedStock" + ${item.quantity},
+                  "reservedStock" +
+                  ${item.quantity},
+
                 "updatedAt" = NOW()
+
               WHERE
                 "id" = ${item.productId}
+
                 AND
                 "stock" - "reservedStock"
                   >= ${item.quantity}
@@ -225,21 +427,13 @@ export async function POST(request: Request) {
 
           if (result !== 1) {
             throw new Error(
-              "Not enough available stock. Please reduce the quantity and try again."
+              "Stock availability changed while placing your order. Please try again."
             );
           }
         }
 
-        // --------------------------------------------------
-        // 10. RETURN CREATED ORDER
-        // --------------------------------------------------
-
         return createdOrder;
       },
-
-      // --------------------------------------------------
-      // TRANSACTION SETTINGS
-      // --------------------------------------------------
       {
         maxWait: 20000,
         timeout: 30000,
@@ -247,17 +441,29 @@ export async function POST(request: Request) {
     );
 
     // --------------------------------------------------
-    // 11. SUCCESS RESPONSE
+    // 9. RETURN SUCCESS RESPONSE
     // --------------------------------------------------
 
     return NextResponse.json(
       {
         success: true,
-        message: "Order created successfully.",
+
+        message:
+          "Order created and inventory reserved successfully.",
+
         order: {
           id: order.id,
           total: order.total,
           status: order.status,
+
+          fulfillmentStatus:
+            order.fulfillmentStatus,
+
+          inventoryStatus:
+            order.inventoryStatus,
+
+          reservationExpiresAt:
+            order.reservationExpiresAt,
         },
       },
       { status: 201 }
@@ -273,12 +479,25 @@ export async function POST(request: Request) {
         ? error.message
         : "Failed to create order.";
 
+    const status =
+      message.includes(
+        "available stock"
+      ) ||
+      message.includes(
+        "availability changed"
+      ) ||
+      message.includes(
+        "no longer available"
+      )
+        ? 409
+        : 500;
+
     return NextResponse.json(
       {
         success: false,
         message,
       },
-      { status: 400 }
+      { status }
     );
   }
 }
