@@ -140,12 +140,42 @@ export default async function CustomerOrderDetailsPage({ params }: PageProps) {
                 </div>
               )}
 
-              {order.status === "PENDING" && (
-                <div className={styles.paymentNotice}>Your payment is not yet confirmed. Fulfillment will begin after payment is verified.</div>
-              )}
-              {order.status === "PAID" && (
-                <div className={styles.successNotice}>✓ Payment confirmed. Thank you for shopping with Simplyire Essentials.</div>
-              )}
+              {/* PAYMENT STATUS MESSAGES */}
+
+{order.status === "PENDING" && (
+  <div className={styles.paymentNotice}>
+    Your payment is awaiting confirmation.
+    Your order will proceed to fulfillment after
+    successful payment verification. Please check
+    your payment status before attempting another payment.
+  </div>
+)}
+
+{order.status === "PAID" && (
+  <div className={styles.successNotice}>
+    ✓ Payment confirmed! Thank you for shopping
+    with Simplyire Essentials. You can follow
+    your order's delivery progress above.
+  </div>
+)}
+
+{order.status === "FAILED" && (
+  <div className={styles.cancelledNotice}>
+    Your payment was unsuccessful. Your order
+    cannot proceed to fulfillment until payment
+    is resolved. If money was deducted from your
+    account, contact our support team with your
+    payment reference.
+  </div>
+)}
+
+{order.status === "REFUNDED" && (
+  <div className={styles.paymentNotice}>
+    This payment has been marked as refunded.
+    Contact our support team if you need
+    clarification about your refund.
+  </div>
+)}
             </section>
 
             <section className={styles.panel}>
