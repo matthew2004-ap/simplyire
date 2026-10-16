@@ -1,57 +1,177 @@
+import "server-only";
+
+import { Prisma } from "@/app/generated/prisma/client";
 import { db } from "@/lib/db";
+
+const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
+
+const PAYSTACK_VERIFY_URL = "https://api.paystack.co/transaction/verify";
+
+const DEFAULT_RESERVATION_MINUTES = 30;
 
 type PaymentDetails = {
   reference: string;
   channel?: string | null;
-  paidAt?: string | null;
 };
 
-type CleanupResult = {
+type ReconciliationResult = {
   orderId: string;
-  action: string;
+  action: "RELEASED" | "COMMITTED" | "PENDING" | "FAILED";
+  message?: string;
 };
 
-type CleanupSummary = {
+type ReconciliationSummary = {
   scanned: number;
   released: number;
   committed: number;
   stillPending: number;
   failed: number;
-  results: CleanupResult[];
+  results: ReconciliationResult[];
 };
 
+type PaystackVerificationResponse = {
+  status?: boolean;
+  message?: string;
+  data?: {
+    status?: string;
+    reference?: string;
+    amount?: number;
+    currency?: string;
+    metadata?: {
+      orderId?: string;
+      [key: string]: unknown;
+    } | null;
+    channel?: string;
+  };
+};
+
+function getReservationExpiry(minutes = DEFAULT_RESERVATION_MINUTES) {
+  return new Date(Date.now() + minutes * 60 * 1000);
+}
+
 /**
- * Confirms a payment and commits reserved inventory.
+ * Reserve inventory when creating an order.
  *
- * This function is shared by the Paystack verification
- * route, webhook, and reservation cleanup.
+ * Call this inside your order-creation transaction, if you use this helper
+ * in that flow. Do not reserve the same order twice.
  *
- * An order's reserved inventory can only be committed
- * once. The inventory transition and stock adjustments
- * occur in one database transaction.
+ * This helper assumes Product.stock is physical stock and Product.reservedStock
+ * is the quantity already reserved by unpaid orders.
+ */
+export async function reserveOrderInventory(
+  tx: Prisma.TransactionClient,
+  orderId: string,
+  reservationMinutes = DEFAULT_RESERVATION_MINUTES,
+) {
+  const order = await tx.order.findUnique({
+    where: { id: orderId },
+    include: { items: true },
+  });
+
+  if (!order) {
+    throw new Error("Order not found.");
+  }
+
+  if (order.inventoryStatus === "RESERVED") {
+    return order;
+  }
+
+  if (order.inventoryStatus === "COMMITTED") {
+    throw new Error("Inventory has already been committed for this order.");
+  }
+
+  if (order.inventoryStatus === "RELEASED") {
+    throw new Error("Inventory reservation has already been released.");
+  }
+
+  if (order.status !== "PENDING") {
+    throw new Error("Only pending orders can reserve inventory.");
+  }
+
+  if (order.items.length === 0) {
+    throw new Error("Cannot reserve inventory for an order with no items.");
+  }
+
+  // Combine duplicate product lines so stock is checked and reserved once
+  // per product.
+  const quantities = new Map<string, number>();
+
+  for (const item of order.items) {
+    if (!Number.isInteger(item.quantity) || item.quantity <= 0) {
+      throw new Error("Invalid product quantity in order.");
+    }
+
+    quantities.set(
+      item.productId,
+      (quantities.get(item.productId) ?? 0) + item.quantity,
+    );
+  }
+
+  for (const [productId, quantity] of quantities) {
+    const result = await tx.$executeRaw`
+      UPDATE "Product"
+      SET "reservedStock" = "reservedStock" + ${quantity}
+      WHERE "id" = ${productId}
+        AND "stock" - "reservedStock" >= ${quantity}
+    `;
+
+    if (result !== 1) {
+      throw new Error(
+        `Insufficient available inventory for product ${productId}.`,
+      );
+    }
+  }
+
+  const updated = await tx.order.update({
+    where: { id: orderId },
+    data: {
+      inventoryStatus: "RESERVED",
+      reservationExpiresAt: getReservationExpiry(reservationMinutes),
+    },
+    include: { items: true },
+  });
+
+  return updated;
+}
+
+/**
+ * Commit reserved inventory after Paystack confirms payment.
+ *
+ * A committed order reduces both physical stock and reservedStock.
+ * A previously committed order is returned without deducting stock again.
  */
 export async function settlePaidOrder(
   orderId: string,
-  payment: PaymentDetails
+  payment: PaymentDetails,
 ) {
+  if (!payment.reference?.trim()) {
+    throw new Error("A valid payment reference is required.");
+  }
+
   return db.$transaction(
     async (tx) => {
       const order = await tx.order.findUnique({
         where: { id: orderId },
-        include: { orderItems: true },
+        include: { items: true },
       });
 
       if (!order) {
         throw new Error("Order not found.");
       }
 
+      if (
+        order.paymentReference &&
+        order.paymentReference !== payment.reference
+      ) {
+        throw new Error("Payment reference does not match this order.");
+      }
+
       if (order.inventoryStatus === "RELEASED") {
         throw new Error(
-          "This order's inventory reservation has already been released."
+          "Cannot commit inventory because the reservation has been released.",
         );
       }
 
-      // The order has already been completely settled.
       if (
         order.status === "PAID" &&
         order.inventoryStatus === "COMMITTED"
@@ -60,159 +180,158 @@ export async function settlePaidOrder(
       }
 
       /*
-       * RESERVED -> COMMITTED
-       *
-       * Claim the transition first. Concurrent webhook,
-       * callback, and cleanup requests cannot all claim
-       * the same reservation.
+       * Legacy orders may not have used inventory reservations.
+       * We intentionally avoid deducting stock for them here because doing so
+       * without knowing their previous inventory handling could double-deduct.
        */
-      if (order.inventoryStatus === "RESERVED") {
-        const claim = await tx.order.updateMany({
-          where: {
-            id: order.id,
-            inventoryStatus: "RESERVED",
-          },
-          data: {
-            status: "PAID",
-            inventoryStatus: "COMMITTED",
-            paymentReference: payment.reference,
-            paymentChannel: payment.channel ?? null,
-            paidAt: payment.paidAt
-              ? new Date(payment.paidAt)
-              : new Date(),
-            reservationExpiresAt: null,
-          },
-        });
-
-        if (claim.count !== 1) {
-          const latest = await tx.order.findUnique({
-            where: { id: order.id },
-          });
-
-          if (
-            latest?.status === "PAID" &&
-            latest.inventoryStatus === "COMMITTED"
-          ) {
-            return latest;
-          }
-
-          throw new Error(
-            "The inventory reservation changed before payment could be committed."
-          );
+      if (order.inventoryStatus === "NONE") {
+        if (order.status === "PAID") {
+          return order;
         }
 
-        /*
-         * Reduce physical stock and reserved stock together.
-         *
-         * Example:
-         * stock = 10, reservedStock = 2, quantity = 2
-         * Result: stock = 8, reservedStock = 0
-         */
-        for (const item of order.orderItems) {
-          const updated = await tx.$executeRaw`
-            UPDATE "Product"
-            SET
-              "stock" = "stock" - ${item.quantity},
-              "reservedStock" = "reservedStock" - ${item.quantity},
-              "updatedAt" = NOW()
-            WHERE
-              "id" = ${item.productId}
-              AND "stock" >= ${item.quantity}
-              AND "reservedStock" >= ${item.quantity}
-          `;
+        throw new Error(
+          "This order has no inventory reservation. Reconcile its inventory before settling payment.",
+        );
+      }
 
-          if (updated !== 1) {
-            throw new Error(
-              "Inventory could not be committed. The transaction has been rolled back."
-            );
-          }
-        }
+      if (order.inventoryStatus !== "RESERVED") {
+        throw new Error("Order inventory is not reserved.");
+      }
 
-        const committedOrder = await tx.order.findUnique({
-          where: { id: order.id },
-          include: { orderItems: true },
-        });
-
-        if (!committedOrder) {
-          throw new Error(
-            "Could not retrieve the committed order."
-          );
-        }
-
-        return committedOrder;
+      if (order.status !== "PENDING" && order.status !== "PAID") {
+        throw new Error(
+          `Cannot settle an order with payment status ${order.status}.`,
+        );
       }
 
       /*
-       * Legacy orders with inventoryStatus = NONE had
-       * stock deducted by the previous implementation.
-       * Do not deduct stock from those orders again.
+       * Claim the reservation using a conditional update.
+       * If another request has already changed its state, this update fails.
        */
-      if (order.status === "PAID") {
-        return order;
-      }
-
-      return tx.order.update({
-        where: { id: order.id },
+      const claim = await tx.order.updateMany({
+        where: {
+          id: orderId,
+          inventoryStatus: "RESERVED",
+          status: { in: ["PENDING", "PAID"] },
+        },
         data: {
           status: "PAID",
+          inventoryStatus: "COMMITTED",
           paymentReference: payment.reference,
           paymentChannel: payment.channel ?? null,
-          paidAt: payment.paidAt
-            ? new Date(payment.paidAt)
-            : new Date(),
+          paidAt: new Date(),
           reservationExpiresAt: null,
         },
-        include: { orderItems: true },
       });
+
+      if (claim.count !== 1) {
+        const latest = await tx.order.findUnique({
+          where: { id: orderId },
+          include: { items: true },
+        });
+
+        if (
+          latest?.status === "PAID" &&
+          latest.inventoryStatus === "COMMITTED"
+        ) {
+          return latest;
+        }
+
+        throw new Error(
+          "Could not claim the inventory reservation. Please retry safely.",
+        );
+      }
+
+      // Aggregate duplicate product lines before deducting inventory.
+      const quantities = new Map<string, number>();
+
+      for (const item of order.items) {
+        quantities.set(
+          item.productId,
+          (quantities.get(item.productId) ?? 0) + item.quantity,
+        );
+      }
+
+      for (const [productId, quantity] of quantities) {
+        const result = await tx.$executeRaw`
+          UPDATE "Product"
+          SET
+            "stock" = "stock" - ${quantity},
+            "reservedStock" = "reservedStock" - ${quantity}
+          WHERE "id" = ${productId}
+            AND "stock" >= ${quantity}
+            AND "reservedStock" >= ${quantity}
+        `;
+
+        if (result !== 1) {
+          // Throwing rolls back the transaction, including the order update.
+          throw new Error(
+            `Could not commit inventory for product ${productId}.`,
+          );
+        }
+      }
+
+      const updatedOrder = await tx.order.findUnique({
+        where: { id: orderId },
+        include: { items: true },
+      });
+
+      if (!updatedOrder) {
+        throw new Error("Order could not be retrieved after settlement.");
+      }
+
+      return updatedOrder;
     },
     {
       maxWait: 20000,
       timeout: 30000,
-    }
+    },
   );
 }
 
 /**
- * Releases an unpaid inventory reservation.
+ * Release reserved inventory for an unpaid order.
  *
- * RESERVED -> RELEASED
- *
- * This is idempotent: repeated requests cannot repeatedly
- * subtract the same reservation.
+ * This does not reduce physical stock. It only reduces reservedStock.
  */
-export async function releaseOrderReservation(
-  orderId: string
-) {
+export async function releaseOrderReservation(orderId: string) {
   return db.$transaction(
     async (tx) => {
       const order = await tx.order.findUnique({
         where: { id: orderId },
-        include: { orderItems: true },
+        include: { items: true },
       });
 
       if (!order) {
         throw new Error("Order not found.");
       }
 
+      if (
+        order.status === "PAID" ||
+        order.inventoryStatus === "COMMITTED"
+      ) {
+        throw new Error(
+          "Cannot release inventory for an order that has been paid or committed.",
+        );
+      }
+
+      if (order.inventoryStatus === "RELEASED") {
+        return order;
+      }
+
+      if (order.inventoryStatus === "NONE") {
+        return order;
+      }
+
       if (order.inventoryStatus !== "RESERVED") {
-        return order;
+        throw new Error("Order inventory is not reserved.");
       }
 
-      // Never release inventory for a paid order.
-      if (order.status === "PAID") {
-        return order;
-      }
-
-      /*
-       * Claim the release transition before changing
-       * inventory. If payment settlement wins the race,
-       * this update will not claim the order.
-       */
       const claim = await tx.order.updateMany({
         where: {
-          id: order.id,
+          id: orderId,
           inventoryStatus: "RESERVED",
-          status: { not: "PAID" },
+          status: "PENDING",
         },
         data: {
           status: "FAILED",
@@ -223,87 +342,122 @@ export async function releaseOrderReservation(
 
       if (claim.count !== 1) {
         const latest = await tx.order.findUnique({
-          where: { id: order.id },
+          where: { id: orderId },
+          include: { items: true },
         });
 
-        if (!latest) {
-          throw new Error("Order not found.");
+        if (
+          latest?.inventoryStatus === "RELEASED" ||
+          latest?.inventoryStatus === "NONE"
+        ) {
+          return latest;
         }
 
-        return latest;
+        throw new Error(
+          "Could not release this inventory reservation. Check the latest order state.",
+        );
       }
 
-      for (const item of order.orderItems) {
-        const updated = await tx.$executeRaw`
+      const quantities = new Map<string, number>();
+
+      for (const item of order.items) {
+        quantities.set(
+          item.productId,
+          (quantities.get(item.productId) ?? 0) + item.quantity,
+        );
+      }
+
+      for (const [productId, quantity] of quantities) {
+        const result = await tx.$executeRaw`
           UPDATE "Product"
-          SET
-            "reservedStock" = "reservedStock" - ${item.quantity},
-            "updatedAt" = NOW()
-          WHERE
-            "id" = ${item.productId}
-            AND "reservedStock" >= ${item.quantity}
+          SET "reservedStock" = "reservedStock" - ${quantity}
+          WHERE "id" = ${productId}
+            AND "reservedStock" >= ${quantity}
         `;
 
-        if (updated !== 1) {
+        if (result !== 1) {
           throw new Error(
-            "Reserved inventory could not be released. The transaction has been rolled back."
+            `Could not release reserved inventory for product ${productId}.`,
           );
         }
       }
 
-      const releasedOrder = await tx.order.findUnique({
-        where: { id: order.id },
-        include: { orderItems: true },
+      const updatedOrder = await tx.order.findUnique({
+        where: { id: orderId },
+        include: { items: true },
       });
 
-      if (!releasedOrder) {
-        throw new Error(
-          "Could not retrieve the released order."
-        );
+      if (!updatedOrder) {
+        throw new Error("Order could not be retrieved after release.");
       }
 
-      return releasedOrder;
+      return updatedOrder;
     },
     {
       maxWait: 20000,
       timeout: 30000,
-    }
+    },
   );
 }
 
 /**
- * Checks expired reservations against Paystack.
+ * Verify a Paystack transaction using its reference.
+ */
+async function verifyPaystackPayment(
+  reference: string,
+): Promise<PaystackVerificationResponse["data"] | null> {
+  if (!PAYSTACK_SECRET_KEY) {
+    throw new Error("PAYSTACK_SECRET_KEY is not configured.");
+  }
+
+  const response = await fetch(
+    `${PAYSTACK_VERIFY_URL}/${encodeURIComponent(reference)}`,
+    {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
+        Accept: "application/json",
+      },
+      cache: "no-store",
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      `Paystack verification request failed with status ${response.status}.`,
+    );
+  }
+
+  const result =
+    (await response.json()) as PaystackVerificationResponse;
+
+  if (!result.status || !result.data) {
+    throw new Error(result.message || "Paystack verification failed.");
+  }
+
+  return result.data;
+}
+
+/**
+ * Reconcile expired reservations.
  *
- * Successful payments are committed.
- * Failed or abandoned payments are released.
- * Pending payments retain their reservations.
- *
- * Orders are processed individually so an error on one
- * order does not stop the entire cleanup.
+ * For expired orders with a payment reference, verify the transaction with
+ * Paystack before releasing inventory. Successful payments are committed;
+ * pending payments keep their reservation; failed or abandoned payments
+ * release the reservation.
  */
 export async function reconcileExpiredReservations(
-  limit = 10
-): Promise<CleanupSummary> {
-  const summary: CleanupSummary = {
-    scanned: 0,
-    released: 0,
-    committed: 0,
-    stillPending: 0,
-    failed: 0,
-    results: [],
-  };
-
-  const safeLimit = Math.max(
-    1,
-    Math.min(Math.floor(limit), 100)
-  );
+  limit = 10,
+): Promise<ReconciliationSummary> {
+  const safeLimit = Math.min(Math.max(Math.floor(limit), 1), 100);
+  const now = new Date();
 
   const expiredOrders = await db.order.findMany({
     where: {
       inventoryStatus: "RESERVED",
+      status: "PENDING",
       reservationExpiresAt: {
-        not: null,
-        lte: new Date(),
+        lte: now,
       },
     },
     orderBy: {
@@ -312,204 +466,128 @@ export async function reconcileExpiredReservations(
     take: safeLimit,
     select: {
       id: true,
-      status: true,
       total: true,
+      currency: true,
       paymentReference: true,
-      reservationExpiresAt: true,
     },
   });
 
-  summary.scanned = expiredOrders.length;
-
-  const paystackSecret =
-    process.env.PAYSTACK_SECRET_KEY;
+  const summary: ReconciliationSummary = {
+    scanned: expiredOrders.length,
+    released: 0,
+    committed: 0,
+    stillPending: 0,
+    failed: 0,
+    results: [],
+  };
 
   for (const order of expiredOrders) {
     try {
+      const reference = order.paymentReference;
+
       /*
-       * If Paystack initialization never succeeded,
-       * there is no payment reference to verify.
+       * If no reference exists, there is no Paystack transaction to verify.
+       * The reservation can be released.
        */
-      if (!order.paymentReference) {
-        if (order.status === "PAID") {
-          summary.failed++;
-
-          summary.results.push({
-            orderId: order.id,
-            action: "PAID_WITHOUT_REFERENCE",
-          });
-
-          continue;
-        }
-
+      if (!reference) {
         await releaseOrderReservation(order.id);
 
-        summary.released++;
-
+        summary.released += 1;
         summary.results.push({
           orderId: order.id,
-          action: "RELEASED_NO_REFERENCE",
+          action: "RELEASED",
+          message: "Expired order had no payment reference.",
         });
 
         continue;
       }
 
-      if (!paystackSecret) {
-        throw new Error(
-          "PAYSTACK_SECRET_KEY is not configured."
-        );
-      }
+      const payment = await verifyPaystackPayment(reference);
 
-      const response = await fetch(
-        `https://api.paystack.co/transaction/verify/${encodeURIComponent(
-          order.paymentReference
-        )}`,
-        {
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${paystackSecret}`,
-          },
-          cache: "no-store",
-          signal: AbortSignal.timeout(8000),
-        }
-      );
-
-      const data = await response.json();
-
-      if (!response.ok || !data.status || !data.data) {
-        throw new Error(
-          data.message ||
-            "Could not verify the Paystack transaction."
-        );
-      }
-
-      const transaction = data.data;
-
-      /*
-       * Check that the transaction matches this order.
-       */
-      if (
-        transaction.reference !==
-        order.paymentReference
-      ) {
-        throw new Error(
-          "Payment reference does not match the order."
-        );
-      }
-
-      if (
-        String(transaction.metadata?.orderId) !==
-        order.id
-      ) {
-        throw new Error(
-          "Payment metadata does not match the order."
-        );
-      }
-
-      if (
-        Number(transaction.amount) !==
-        order.total * 100
-      ) {
-        throw new Error(
-          "Payment amount does not match the order."
-        );
-      }
-
-      if (transaction.currency !== "NGN") {
-        throw new Error(
-          "Payment currency does not match the order."
-        );
-      }
-
-      /*
-       * Commit genuine successful payments.
-       */
-      if (transaction.status === "success") {
-        const result = await settlePaidOrder(
-          order.id,
-          {
-            reference: transaction.reference,
-            channel: transaction.channel,
-            paidAt: transaction.paid_at,
-          }
-        );
-
-        if (
-          result.status === "PAID" &&
-          result.inventoryStatus === "COMMITTED"
-        ) {
-          summary.committed++;
-
-          summary.results.push({
-            orderId: order.id,
-            action: "COMMITTED",
-          });
-        } else {
-          summary.failed++;
-
-          summary.results.push({
-            orderId: order.id,
-            action: "PAYMENT_NOT_SETTLED",
-          });
-        }
-
-        continue;
-      }
-
-      /*
-       * Only explicit failed or abandoned payments
-       * release a reservation.
-       */
-      if (
-        transaction.status === "failed" ||
-        transaction.status === "abandoned"
-      ) {
-        if (order.status === "PAID") {
-          summary.failed++;
-
-          summary.results.push({
-            orderId: order.id,
-            action: "PAID_ORDER_REQUIRES_REVIEW",
-          });
-
-          continue;
-        }
-
-        await releaseOrderReservation(order.id);
-
-        summary.released++;
-
+      if (!payment) {
+        summary.stillPending += 1;
         summary.results.push({
           orderId: order.id,
-          action: "RELEASED_FAILED_PAYMENT",
+          action: "PENDING",
+          message: "Paystack returned no transaction data.",
         });
 
         continue;
       }
 
-      /*
-       * Pending, ongoing or processing payments
-       * keep their inventory reservation.
-       */
-      summary.stillPending++;
+      if (payment.reference !== reference) {
+        throw new Error("Paystack returned a mismatched payment reference.");
+      }
 
+      if (
+        payment.metadata?.orderId &&
+        payment.metadata.orderId !== order.id
+      ) {
+        throw new Error("Paystack metadata does not match the order.");
+      }
+
+      if (
+        typeof payment.amount !== "number" ||
+        payment.amount !== order.total * 100
+      ) {
+        throw new Error("Paystack amount does not match the order total.");
+      }
+
+      if (
+        payment.currency &&
+        payment.currency.toUpperCase() !== "NGN"
+      ) {
+        throw new Error("Paystack currency is not NGN.");
+      }
+
+      if (payment.status === "success") {
+        await settlePaidOrder(order.id, {
+          reference,
+          channel: payment.channel ?? null,
+        });
+
+        summary.committed += 1;
+        summary.results.push({
+          orderId: order.id,
+          action: "COMMITTED",
+          message: "Successful payment verified and inventory committed.",
+        });
+
+        continue;
+      }
+
+      if (
+        payment.status === "failed" ||
+        payment.status === "abandoned"
+      ) {
+        await releaseOrderReservation(order.id);
+
+        summary.released += 1;
+        summary.results.push({
+          orderId: order.id,
+          action: "RELEASED",
+          message: `Paystack transaction status: ${payment.status}.`,
+        });
+
+        continue;
+      }
+
+      // Do not release stock for an ongoing transaction.
+      summary.stillPending += 1;
       summary.results.push({
         orderId: order.id,
-        action: `PAYMENT_${String(
-          transaction.status
-        ).toUpperCase()}`,
+        action: "PENDING",
+        message: `Paystack transaction status: ${payment.status ?? "unknown"}.`,
       });
     } catch (error) {
-      summary.failed++;
-
-      console.error(
-        `Failed to reconcile expired order ${order.id}:`,
-        error
-      );
-
+      summary.failed += 1;
       summary.results.push({
         orderId: order.id,
-        action: "ERROR",
+        action: "FAILED",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Unknown reconciliation error.",
       });
     }
   }
