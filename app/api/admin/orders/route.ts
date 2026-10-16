@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { db } from "@/lib/db";
+import { sendOrderNotificationEmail } from "@/lib/order-notifications";
 
 const ALLOWED_FULFILLMENT_STATUSES = [
   "PENDING",
@@ -12,6 +13,19 @@ const ALLOWED_FULFILLMENT_STATUSES = [
 
 type FulfillmentStatus =
   (typeof ALLOWED_FULFILLMENT_STATUSES)[number];
+
+type NotificationEvent =
+  | "PROCESSING"
+  | "SHIPPED"
+  | "DELIVERED";
+
+type FulfillmentNotification = {
+  orderId: string;
+  customerName: string;
+  email: string;
+  total: number;
+  event: NotificationEvent;
+};
 
 const fulfillmentRank: Record<string, number> = {
   PENDING: 0,
@@ -37,7 +51,10 @@ async function requireAdmin() {
     return {
       ok: false as const,
       response: NextResponse.json(
-        { success: false, message: "You must be logged in." },
+        {
+          success: false,
+          message: "You must be logged in.",
+        },
         { status: 401 }
       ),
     };
@@ -47,7 +64,10 @@ async function requireAdmin() {
     return {
       ok: false as const,
       response: NextResponse.json(
-        { success: false, message: "Admin access required." },
+        {
+          success: false,
+          message: "Admin access required.",
+        },
         { status: 403 }
       ),
     };
@@ -56,13 +76,23 @@ async function requireAdmin() {
   return { ok: true as const };
 }
 
+// =============================================
+// GET: LOAD ADMIN ORDERS
+// =============================================
+
 export async function GET() {
   try {
     const auth = await requireAdmin();
-    if (!auth.ok) return auth.response;
+
+    if (!auth.ok) {
+      return auth.response;
+    }
 
     const orders = await db.order.findMany({
-      orderBy: { createdAt: "desc" },
+      orderBy: {
+        createdAt: "desc",
+      },
+
       include: {
         orderItems: {
           include: {
@@ -78,27 +108,53 @@ export async function GET() {
       },
     });
 
-    return NextResponse.json({ success: true, orders });
+    return NextResponse.json({
+      success: true,
+      orders,
+    });
   } catch (error) {
     console.error("Admin orders GET error:", error);
+
     return NextResponse.json(
-      { success: false, message: "Failed to load orders." },
+      {
+        success: false,
+        message: "Failed to load orders.",
+      },
       { status: 500 }
     );
   }
 }
 
+// =============================================
+// PATCH: UPDATE FULFILLMENT STATUS
+// =============================================
+
 export async function PATCH(request: Request) {
   try {
+    // -----------------------------------------
+    // 1. Authenticate administrator
+    // -----------------------------------------
+
     const auth = await requireAdmin();
-    if (!auth.ok) return auth.response;
+
+    if (!auth.ok) {
+      return auth.response;
+    }
+
+    // -----------------------------------------
+    // 2. Validate request body
+    // -----------------------------------------
 
     let parsedBody: unknown;
+
     try {
       parsedBody = await request.json();
     } catch {
       return NextResponse.json(
-        { success: false, message: "Invalid JSON request body." },
+        {
+          success: false,
+          message: "Invalid JSON request body.",
+        },
         { status: 400 }
       );
     }
@@ -109,12 +165,16 @@ export async function PATCH(request: Request) {
       Array.isArray(parsedBody)
     ) {
       return NextResponse.json(
-        { success: false, message: "Invalid request body." },
+        {
+          success: false,
+          message: "Invalid request body.",
+        },
         { status: 400 }
       );
     }
 
     const body = parsedBody as Record<string, unknown>;
+
     const id = body.id;
     const requestedStatus = body.fulfillmentStatus;
 
@@ -129,26 +189,40 @@ export async function PATCH(request: Request) {
       return NextResponse.json(
         {
           success: false,
-          message: "A valid order ID and fulfillment status are required.",
+          message:
+            "A valid order ID and fulfillment status are required.",
         },
         { status: 400 }
       );
     }
 
-    const targetStatus = requestedStatus as FulfillmentStatus;
+    const targetStatus =
+      requestedStatus as FulfillmentStatus;
+
     const orderId = id.trim();
 
-    const updatedOrder = await db.$transaction(
+    // -----------------------------------------
+    // 3. Update order and inventory atomically
+    // -----------------------------------------
+
+    const updateResult = await db.$transaction(
       async (tx) => {
         const order = await tx.order.findUnique({
-          where: { id: orderId },
+          where: {
+            id: orderId,
+          },
+
           select: {
             id: true,
+            customer: true,
+            email: true,
+            total: true,
             status: true,
             fulfillmentStatus: true,
             inventoryStatus: true,
             reservationExpiresAt: true,
             paymentReference: true,
+
             orderItems: {
               select: {
                 productId: true,
@@ -159,37 +233,67 @@ export async function PATCH(request: Request) {
         });
 
         if (!order) {
-          throw new RouteError("Order not found.", 404);
+          throw new RouteError(
+            "Order not found.",
+            404
+          );
         }
 
-        // Repeating the current status is a safe no-op.
-        if (order.fulfillmentStatus === targetStatus) {
-          const unchanged = await tx.order.findUnique({
-            where: { id: orderId },
-            select: {
-              id: true,
-              status: true,
-              fulfillmentStatus: true,
-              inventoryStatus: true,
-              reservationExpiresAt: true,
-              updatedAt: true,
-            },
-          });
+        // ---------------------------------------
+        // Repeated status: safe no-op
+        // ---------------------------------------
+
+        if (
+          order.fulfillmentStatus === targetStatus
+        ) {
+          const unchanged =
+            await tx.order.findUnique({
+              where: {
+                id: orderId,
+              },
+
+              select: {
+                id: true,
+                status: true,
+                fulfillmentStatus: true,
+                inventoryStatus: true,
+                reservationExpiresAt: true,
+                updatedAt: true,
+              },
+            });
 
           if (!unchanged) {
-            throw new RouteError("Order not found.", 404);
+            throw new RouteError(
+              "Order not found.",
+              404
+            );
           }
-          return unchanged;
+
+          // Do not send a second notification when
+          // the administrator repeats the same status.
+          return {
+            order: unchanged,
+            notification:
+              null as FulfillmentNotification | null,
+          };
         }
 
-        // Cancellation is terminal; reopening must be handled as a separate,
-        // deliberate administrative workflow rather than a status dropdown action.
-        if (order.fulfillmentStatus === "CANCELLED") {
+        // ---------------------------------------
+        // Cancelled orders cannot be reopened
+        // ---------------------------------------
+
+        if (
+          order.fulfillmentStatus === "CANCELLED"
+        ) {
           throw new RouteError(
             "Cancelled orders cannot be reopened from this control.",
             409
           );
         }
+
+        // ---------------------------------------
+        // Handle cancellation
+        // ---------------------------------------
 
         if (targetStatus === "CANCELLED") {
           if (order.status === "PAID") {
@@ -199,40 +303,52 @@ export async function PATCH(request: Request) {
             );
           }
 
-          // If a Paystack attempt has been initialized, wait for its verified
-          // result before cancellation to avoid a payment/cancellation race.
-          if (order.status === "PENDING" && order.paymentReference) {
+          // Do not cancel while a payment attempt
+          // is awaiting verification.
+          if (
+            order.status === "PENDING" &&
+            order.paymentReference
+          ) {
             throw new RouteError(
               "A payment attempt already exists. Verify its result before cancelling this order.",
               409
             );
           }
 
-          if (order.inventoryStatus === "COMMITTED") {
+          if (
+            order.inventoryStatus === "COMMITTED"
+          ) {
             throw new RouteError(
               "Inventory is already committed for this order. Review the order before cancelling it.",
               409
             );
           }
 
-          if (order.inventoryStatus === "RESERVED") {
-            // Claim cancellation only while this is still an unpaid, reserved
-            // order. If payment settlement wins the race, this update affects
-            // no row and the whole transaction is rejected.
-            const claimed = await tx.order.updateMany({
-              where: {
-                id: orderId,
-                status: { not: "PAID" },
-                fulfillmentStatus: order.fulfillmentStatus,
-                inventoryStatus: "RESERVED",
-                paymentReference: order.paymentReference,
-              },
-              data: {
-                fulfillmentStatus: "CANCELLED",
-                inventoryStatus: "RELEASED",
-                reservationExpiresAt: null,
-              },
-            });
+          if (
+            order.inventoryStatus === "RESERVED"
+          ) {
+            // Claim cancellation only if the order
+            // has not changed since it was read.
+            const claimed =
+              await tx.order.updateMany({
+                where: {
+                  id: orderId,
+                  status: {
+                    not: "PAID",
+                  },
+                  fulfillmentStatus:
+                    order.fulfillmentStatus,
+                  inventoryStatus: "RESERVED",
+                  paymentReference:
+                    order.paymentReference,
+                },
+
+                data: {
+                  fulfillmentStatus: "CANCELLED",
+                  inventoryStatus: "RELEASED",
+                  reservationExpiresAt: null,
+                },
+              });
 
             if (claimed.count !== 1) {
               throw new RouteError(
@@ -241,18 +357,24 @@ export async function PATCH(request: Request) {
               );
             }
 
-            // Release each item's reserved units without changing physical
-            // stock or the payment status.
+            // Release reserved stock without reducing
+            // the product's physical stock quantity.
             for (const item of order.orderItems) {
-              const released = await tx.product.updateMany({
-                where: {
-                  id: item.productId,
-                  reservedStock: { gte: item.quantity },
-                },
-                data: {
-                  reservedStock: { decrement: item.quantity },
-                },
-              });
+              const released =
+                await tx.product.updateMany({
+                  where: {
+                    id: item.productId,
+                    reservedStock: {
+                      gte: item.quantity,
+                    },
+                  },
+
+                  data: {
+                    reservedStock: {
+                      decrement: item.quantity,
+                    },
+                  },
+                });
 
               if (released.count !== 1) {
                 throw new RouteError(
@@ -262,21 +384,28 @@ export async function PATCH(request: Request) {
               }
             }
           } else {
-            // Legacy orders may have no reservation to release. Keep their
-            // payment status unchanged and cancel only fulfillment.
-            const claimed = await tx.order.updateMany({
-              where: {
-                id: orderId,
-                status: { not: "PAID" },
-                fulfillmentStatus: order.fulfillmentStatus,
-                inventoryStatus: order.inventoryStatus,
-                paymentReference: order.paymentReference,
-              },
-              data: {
-                fulfillmentStatus: "CANCELLED",
-                reservationExpiresAt: null,
-              },
-            });
+            // Legacy orders may not have a reservation.
+            // Preserve their existing payment status.
+            const claimed =
+              await tx.order.updateMany({
+                where: {
+                  id: orderId,
+                  status: {
+                    not: "PAID",
+                  },
+                  fulfillmentStatus:
+                    order.fulfillmentStatus,
+                  inventoryStatus:
+                    order.inventoryStatus,
+                  paymentReference:
+                    order.paymentReference,
+                },
+
+                data: {
+                  fulfillmentStatus: "CANCELLED",
+                  reservationExpiresAt: null,
+                },
+              });
 
             if (claimed.count !== 1) {
               throw new RouteError(
@@ -286,10 +415,22 @@ export async function PATCH(request: Request) {
             }
           }
         } else {
-          const nextRank = fulfillmentRank[targetStatus];
-          const currentRank = fulfillmentRank[order.fulfillmentStatus];
+          // -------------------------------------
+          // Handle normal fulfillment transitions
+          // -------------------------------------
 
-          if (nextRank === undefined || currentRank === undefined) {
+          const nextRank =
+            fulfillmentRank[targetStatus];
+
+          const currentRank =
+            fulfillmentRank[
+              order.fulfillmentStatus
+            ];
+
+          if (
+            nextRank === undefined ||
+            currentRank === undefined
+          ) {
             throw new RouteError(
               "This fulfillment transition is not supported.",
               400
@@ -303,8 +444,13 @@ export async function PATCH(request: Request) {
             );
           }
 
+          // Fulfillment requires confirmed payment.
           if (
-            ["PROCESSING", "SHIPPED", "DELIVERED"].includes(targetStatus) &&
+            [
+              "PROCESSING",
+              "SHIPPED",
+              "DELIVERED",
+            ].includes(targetStatus) &&
             order.status !== "PAID"
           ) {
             throw new RouteError(
@@ -313,6 +459,8 @@ export async function PATCH(request: Request) {
             );
           }
 
+          // Do not proceed if payment and inventory
+          // records disagree.
           if (
             order.status === "PAID" &&
             order.inventoryStatus === "RELEASED"
@@ -323,15 +471,21 @@ export async function PATCH(request: Request) {
             );
           }
 
-          const changed = await tx.order.updateMany({
-            where: {
-              id: orderId,
-              status: order.status,
-              fulfillmentStatus: order.fulfillmentStatus,
-              inventoryStatus: order.inventoryStatus,
-            },
-            data: { fulfillmentStatus: targetStatus },
-          });
+          const changed =
+            await tx.order.updateMany({
+              where: {
+                id: orderId,
+                status: order.status,
+                fulfillmentStatus:
+                  order.fulfillmentStatus,
+                inventoryStatus:
+                  order.inventoryStatus,
+              },
+
+              data: {
+                fulfillmentStatus: targetStatus,
+              },
+            });
 
           if (changed.count !== 1) {
             throw new RouteError(
@@ -341,45 +495,118 @@ export async function PATCH(request: Request) {
           }
         }
 
-        const result = await tx.order.findUnique({
-          where: { id: orderId },
-          select: {
-            id: true,
-            status: true,
-            fulfillmentStatus: true,
-            inventoryStatus: true,
-            reservationExpiresAt: true,
-            updatedAt: true,
-          },
-        });
+        // ---------------------------------------
+        // Read updated order
+        // ---------------------------------------
+
+        const result =
+          await tx.order.findUnique({
+            where: {
+              id: orderId,
+            },
+
+            select: {
+              id: true,
+              status: true,
+              fulfillmentStatus: true,
+              inventoryStatus: true,
+              reservationExpiresAt: true,
+              updatedAt: true,
+            },
+          });
 
         if (!result) {
-          throw new RouteError("Order not found after update.", 404);
+          throw new RouteError(
+            "Order not found after update.",
+            404
+          );
         }
 
-        return result;
+        // ---------------------------------------
+        // Prepare notification
+        // ---------------------------------------
+
+        let notification:
+          | FulfillmentNotification
+          | null = null;
+
+        if (
+          targetStatus === "PROCESSING" ||
+          targetStatus === "SHIPPED" ||
+          targetStatus === "DELIVERED"
+        ) {
+          notification = {
+            orderId: order.id,
+            customerName: order.customer,
+            email: order.email,
+            total: order.total,
+            event: targetStatus,
+          };
+        }
+
+        return {
+          order: result,
+          notification,
+        };
       },
-      { maxWait: 10000, timeout: 20000 }
+      {
+        maxWait: 10000,
+        timeout: 20000,
+      }
     );
+
+    // -----------------------------------------
+    // 4. Send email AFTER the transaction commits
+    // -----------------------------------------
+
+    if (updateResult.notification) {
+      try {
+        await sendOrderNotificationEmail(
+          updateResult.notification
+        );
+      } catch (emailError) {
+        // An email failure must not undo a successful
+        // database update.
+        console.error(
+          "Order fulfillment notification failed:",
+          emailError
+        );
+      }
+    }
+
+    // -----------------------------------------
+    // 5. Return updated order
+    // -----------------------------------------
 
     return NextResponse.json({
       success: true,
-      message: "Fulfillment status updated successfully.",
-      order: updatedOrder,
+      message:
+        "Fulfillment status updated successfully.",
+      order: updateResult.order,
     });
   } catch (error) {
     if (error instanceof RouteError) {
       return NextResponse.json(
-        { success: false, message: error.message },
-        { status: error.statusCode }
+        {
+          success: false,
+          message: error.message,
+        },
+        {
+          status: error.statusCode,
+        }
       );
     }
 
-    console.error("Admin order fulfillment update error:", error);
+    console.error(
+      "Admin order fulfillment update error:",
+      error
+    );
+
     return NextResponse.json(
       {
         success: false,
-        message: "Failed to update fulfillment status.",
+        message:
+          "Failed to update fulfillment status.",
       },
       { status: 500 }
     );
