@@ -154,8 +154,16 @@ if (
 }
 
 // Send customer to Paystack
-window.location.href =
-  paymentData.payment.authorizationUrl;
+// Send customer to Paystack
+if (!paymentData.authorizationUrl) {
+  throw new Error(
+    "Paystack did not return a payment authorization URL."
+  );
+}
+
+window.location.assign(
+  paymentData.authorizationUrl
+);
     } catch (error) {
       console.error("Checkout error:", error);
 

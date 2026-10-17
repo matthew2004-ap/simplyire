@@ -12,6 +12,7 @@ const DEFAULT_RESERVATION_MINUTES = 30;
 type PaymentDetails = {
   reference: string;
   channel?: string | null;
+  paidAt?: string | Date | null;
 };
 
 type ReconciliationResult = {

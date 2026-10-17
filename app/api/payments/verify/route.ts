@@ -1,15 +1,45 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
+
 import { db } from "@/lib/db";
-import {
-  releaseOrderReservation,
-  settlePaidOrder,
-} from "@/lib/order-inventory";
+import { settlePaidOrder } from "@/lib/order-inventory";
 
-export async function GET(request: Request) {
+const PAYSTACK_VERIFY_URL =
+  "https://api.paystack.co/transaction/verify";
+
+type PaystackVerification = {
+  status?: boolean;
+  message?: string;
+  data?: {
+    status?: string;
+    reference?: string;
+    amount?: number;
+    currency?: string;
+    paid_at?: string | null;
+    channel?: string | null;
+    metadata?: {
+      orderId?: string;
+      [key: string]: unknown;
+    } | null;
+  };
+};
+
+export async function GET(request: NextRequest) {
   try {
-    const { searchParams } = new URL(request.url);
+    const secretKey = process.env.PAYSTACK_SECRET_KEY;
 
-    const reference = searchParams.get("reference");
+    if (!secretKey) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Payment service is not configured.",
+        },
+        { status: 500 },
+      );
+    }
+
+    const reference = request.nextUrl.searchParams
+      .get("reference")
+      ?.trim();
 
     if (!reference) {
       return NextResponse.json(
@@ -17,99 +47,75 @@ export async function GET(request: Request) {
           success: false,
           message: "Payment reference is required.",
         },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
-    const secretKey =
-      process.env.PAYSTACK_SECRET_KEY;
-
-    if (!secretKey) {
-      return NextResponse.json(
-        {
-          success: false,
-          message:
-            "Payment service is not configured.",
-        },
-        { status: 500 }
-      );
-    }
-
-    /*
-      Ask Paystack for the actual transaction.
-      The transaction status is in data.status.
-    */
     const response = await fetch(
-      `https://api.paystack.co/transaction/verify/${encodeURIComponent(
-        reference
-      )}`,
+      `${PAYSTACK_VERIFY_URL}/${encodeURIComponent(reference)}`,
       {
         method: "GET",
         headers: {
           Authorization: `Bearer ${secretKey}`,
+          Accept: "application/json",
         },
         cache: "no-store",
-      }
+      },
     );
 
-    const data = await response.json();
+    const result =
+      (await response.json().catch(() => null)) as
+        | PaystackVerification
+        | null;
 
-    if (!response.ok || !data.status) {
+    if (
+      !response.ok ||
+      !result?.status ||
+      !result.data
+    ) {
+      console.error(
+        "Paystack verification request failed:",
+        result,
+      );
+
       return NextResponse.json(
         {
           success: false,
           message:
-            data.message ||
-            "Payment verification failed.",
+            result?.message ||
+            "Unable to verify payment with Paystack.",
         },
-        { status: 400 }
+        { status: 502 },
       );
     }
 
-    const transaction = data.data;
+    const payment = result.data;
 
-    if (!transaction) {
+    // Confirm that Paystack returned the requested reference.
+    if (payment.reference !== reference) {
+      return NextResponse.json(
+        {
+          success: false,
+          message: "Payment reference does not match.",
+        },
+        { status: 400 },
+      );
+    }
+
+    if (!payment.metadata?.orderId) {
       return NextResponse.json(
         {
           success: false,
           message:
-            "Paystack returned an invalid transaction response.",
+            "The payment response does not contain an order ID.",
         },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
-    /*
-      Get the order ID from the metadata created
-      during Paystack initialization.
-    */
-    if (String(transaction.reference ?? "") !== reference) {
-      return NextResponse.json(
-        { success: false, message: "Verified transaction reference does not match the requested reference." },
-        { status: 400 }
-      );
-    }
-
-    const metadataOrderId =
-      transaction.metadata?.orderId;
-
-    if (!metadataOrderId) {
-      return NextResponse.json(
-        {
-          success: false,
-          message:
-            "Payment is valid, but the order could not be identified.",
-        },
-        { status: 400 }
-      );
-    }
-
-    /*
-      Find our order.
-    */
     const order = await db.order.findUnique({
       where: {
-        id: String(metadataOrderId),
+        id: payment.metadata.orderId,
       },
     });
 
@@ -119,62 +125,27 @@ export async function GET(request: Request) {
           success: false,
           message: "Order not found.",
         },
-        { status: 404 }
+        { status: 404 },
       );
     }
 
     /*
-      Confirm that the reference returned by Paystack
-      belongs to this order.
-
-      New orders have paymentReference saved during
-      Paystack initialization.
-
-      Legacy orders may not have one, so we also
-      accept our SIMPLYIRE-{orderId}-{timestamp}
-      reference pattern for compatibility.
-    */
-    const expectedPrefix =
-      `SIMPLYIRE-${order.id}-`;
-
-    if (
-      order.paymentReference &&
-      order.paymentReference !==
-        transaction.reference
-    ) {
+     * Match the verified reference against the reference stored
+     * on this order. Do not accept another order's transaction.
+     */
+    if (order.paymentReference !== reference) {
       return NextResponse.json(
         {
           success: false,
           message:
-            "Payment reference does not match the order.",
+            "The payment reference does not match this order.",
         },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
     if (
-      !order.paymentReference &&
-      !String(
-        transaction.reference
-      ).startsWith(expectedPrefix)
-    ) {
-      return NextResponse.json(
-        {
-          success: false,
-          message:
-            "Payment reference does not match the order.",
-        },
-        { status: 400 }
-      );
-    }
-
-    /*
-      Extra metadata protection.
-      Make sure Paystack's metadata orderId
-      actually points to this order.
-    */
-    if (
-      String(metadataOrderId) !== order.id
+      payment.metadata.orderId !== order.id
     ) {
       return NextResponse.json(
         {
@@ -182,188 +153,91 @@ export async function GET(request: Request) {
           message:
             "Payment metadata does not match the order.",
         },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
-    /*
-      Check the currency.
-    */
+    // Paystack amounts are expressed in kobo for NGN transactions.
     if (
-      transaction.currency &&
-      transaction.currency !== "NGN"
+      typeof payment.amount !== "number" ||
+      payment.amount !== order.total * 100
     ) {
       return NextResponse.json(
         {
           success: false,
           message:
-            "Payment currency does not match the order.",
+            "The verified payment amount does not match the order total.",
         },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
-    /*
-      Paystack amounts are expressed in kobo.
-    */
-    const expectedAmount =
-      order.total * 100;
-
     if (
-      Number(transaction.amount) !==
-      expectedAmount
-    ) {
-      console.error(
-        "Payment amount mismatch:",
-        {
-          orderTotal: expectedAmount,
-          paystackAmount:
-            transaction.amount,
-          orderId: order.id,
-          reference:
-            transaction.reference,
-        }
-      );
-
-      return NextResponse.json(
-        {
-          success: false,
-          message:
-            "Payment amount does not match the order.",
-        },
-        { status: 400 }
-      );
-    }
-
-    /*
-      Handle unsuccessful payment attempts.
-
-      failed / abandoned:
-      release reserved inventory.
-
-      pending / ongoing / processing / queued:
-      keep the reservation because the payment
-      may still complete.
-    */
-    if (
-      transaction.status === "failed" ||
-      transaction.status === "abandoned"
-    ) {
-      if (
-        order.status !== "PAID" &&
-        order.inventoryStatus === "RESERVED"
-      ) {
-        try {
-          await releaseOrderReservation(
-            order.id
-          );
-        } catch (releaseError) {
-          console.error(
-            "Failed to release order reservation:",
-            releaseError
-          );
-
-          return NextResponse.json(
-            {
-              success: false,
-              message:
-                "Payment failed, but the inventory reservation could not be released automatically.",
-            },
-            { status: 500 }
-          );
-        }
-      }
-
-      return NextResponse.json(
-        {
-          success: false,
-          paid: false,
-          status:
-            transaction.status,
-          message:
-            "Payment was not completed. Your reserved stock has been released.",
-        },
-        { status: 400 }
-      );
-    }
-
-    /*
-      For every state other than success, don't mark
-      the order as paid.
-
-      Paystack can return states such as:
-      pending, ongoing, processing, queued, reversed.
-    */
-    if (
-      transaction.status !== "success"
+      !payment.currency ||
+      payment.currency.toUpperCase() !== "NGN"
     ) {
       return NextResponse.json(
         {
           success: false,
-          paid: false,
-          status:
-            transaction.status,
           message:
-            "Payment has not been completed yet.",
+            "The payment currency does not match NGN.",
         },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
     /*
-      Payment is genuinely successful.
+     * Only Paystack's verified "success" status can mark the
+     * order as paid.
+     */
+    if (payment.status !== "success") {
+      return NextResponse.json({
+        success: true,
+        paid: false,
+        status: payment.status ?? "unknown",
+        message: "Payment has not been confirmed.",
+        reference,
+        orderId: order.id,
+      });
+    }
 
-      IMPORTANT:
-      Do not update the order directly here.
+    /*
+     * The order inventory helper commits stock transactionally
+     * and avoids deducting inventory twice for an already-paid order.
+     */
+    await settlePaidOrder(order.id, {
+      reference,
+      channel: payment.channel ?? null,
+      paidAt: payment.paid_at ?? null,
+    });
 
-      settlePaidOrder() commits reserved inventory
-      and marks the order as PAID in one transaction.
-    */
-    const paidOrder =
-      await settlePaidOrder(
-        order.id,
-        {
-          reference:
-            transaction.reference,
-          channel:
-            transaction.channel,
-          paidAt:
-            transaction.paid_at,
-        }
-      );
+    const updatedOrder = await db.order.findUnique({
+      where: {
+        id: order.id,
+      },
+      select: {
+        id: true,
+        status: true,
+        fulfillmentStatus: true,
+        inventoryStatus: true,
+        paymentReference: true,
+        paymentChannel: true,
+        paidAt: true,
+        total: true,
+      },
+    });
 
     return NextResponse.json({
       success: true,
       paid: true,
-
-      message:
-        "Payment verified successfully.",
-
-      order: {
-        id: paidOrder.id,
-        total: paidOrder.total,
-        status: paidOrder.status,
-        fulfillmentStatus:
-          paidOrder.fulfillmentStatus,
-        inventoryStatus:
-          paidOrder.inventoryStatus,
-      },
-
-      payment: {
-        reference:
-          transaction.reference,
-        amount:
-          transaction.amount,
-        channel:
-          transaction.channel,
-        paidAt:
-          transaction.paid_at,
-      },
+      message: "Payment verified successfully.",
+      reference,
+      order: updatedOrder,
     });
   } catch (error) {
     console.error(
       "Payment verification error:",
-      error
+      error,
     );
 
     return NextResponse.json(
@@ -372,9 +246,9 @@ export async function GET(request: Request) {
         message:
           error instanceof Error
             ? error.message
-            : "Payment verification failed.",
+            : "An unexpected verification error occurred.",
       },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }
