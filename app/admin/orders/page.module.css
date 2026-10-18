@@ -94,3 +94,16 @@
     font-size: 11px;
   }
 }
+
+.mobile-inventory-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  font-size: 0.875rem;
+}
+
+.mobile-inventory-status > span:first-child {
+  color: #666;
+}

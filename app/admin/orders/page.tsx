@@ -31,6 +31,21 @@ type Order = {
   orderItems: OrderItem[];
 };
 
+type InventoryFilter =
+  | "ALL"
+  | "PAYMENT_PENDING"
+  | "PAYMENT_PAID"
+  | "PAYMENT_FAILED"
+  | "FULFILLMENT_PENDING"
+  | "PROCESSING"
+  | "SHIPPED"
+  | "DELIVERED"
+  | "CANCELLED"
+  | "INVENTORY_NONE"
+  | "INVENTORY_RESERVED"
+  | "INVENTORY_COMMITTED"
+  | "INVENTORY_RELEASED";
+
 function formatNaira(amount: number) {
   return new Intl.NumberFormat("en-NG", {
     style: "currency",
@@ -78,11 +93,47 @@ function getPaymentClass(status: string) {
   }
 }
 
+function getInventoryClass(status: string) {
+  switch ((status || "NONE").toUpperCase()) {
+    case "COMMITTED":
+      return "order-badge order-badge-paid";
+
+    case "RESERVED":
+      return "order-badge order-badge-pending";
+
+    case "RELEASED":
+      return "order-badge order-badge-failed";
+
+    case "NONE":
+    default:
+      return "order-badge";
+  }
+}
+
+function getInventoryLabel(status: string) {
+  const normalizedStatus = (status || "NONE").toUpperCase();
+
+  switch (normalizedStatus) {
+    case "COMMITTED":
+      return "Committed";
+
+    case "RESERVED":
+      return "Reserved";
+
+    case "RELEASED":
+      return "Released";
+
+    case "NONE":
+    default:
+      return "None";
+  }
+}
 
 export default function AdminOrdersPage() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState("ALL");
+  const [filter, setFilter] =
+    useState<InventoryFilter>("ALL");
   const [selectedOrder, setSelectedOrder] =
     useState<Order | null>(null);
 
@@ -98,8 +149,7 @@ export default function AdminOrdersPage() {
         order.id === orderId
           ? {
               ...order,
-              fulfillmentStatus:
-                status,
+              fulfillmentStatus: status,
             }
           : order
       )
@@ -109,8 +159,7 @@ export default function AdminOrdersPage() {
       currentOrder?.id === orderId
         ? {
             ...currentOrder,
-            fulfillmentStatus:
-              status,
+            fulfillmentStatus: status,
           }
         : currentOrder
     );
@@ -132,8 +181,7 @@ export default function AdminOrdersPage() {
 
       if (!response.ok || !data.success) {
         throw new Error(
-          data.message ||
-            "Failed to load orders."
+          data.message || "Failed to load orders."
         );
       }
 
@@ -156,7 +204,7 @@ export default function AdminOrdersPage() {
   }
 
   useEffect(() => {
-    // Initial client-side fetch; state updates happen after the request resolves.
+    // Initial client-side fetch.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     loadOrders();
   }, []);
@@ -179,8 +227,15 @@ export default function AdminOrdersPage() {
           value.toLowerCase().includes(query)
         );
 
-      const paymentStatus = order.status.toUpperCase();
-      const fulfillmentStatus = order.fulfillmentStatus.toUpperCase();
+      const paymentStatus =
+        order.status.toUpperCase();
+
+      const fulfillmentStatus =
+        order.fulfillmentStatus.toUpperCase();
+
+      const inventoryStatus = (
+        order.inventoryStatus || "NONE"
+      ).toUpperCase();
 
       let matchesFilter = filter === "ALL";
 
@@ -188,27 +243,59 @@ export default function AdminOrdersPage() {
         case "PAYMENT_PENDING":
           matchesFilter = paymentStatus === "PENDING";
           break;
+
         case "PAYMENT_PAID":
           matchesFilter = paymentStatus === "PAID";
           break;
+
         case "PAYMENT_FAILED":
           matchesFilter = paymentStatus === "FAILED";
           break;
+
         case "FULFILLMENT_PENDING":
-          matchesFilter = fulfillmentStatus === "PENDING";
+          matchesFilter =
+            fulfillmentStatus === "PENDING";
           break;
+
         case "PROCESSING":
-          matchesFilter = fulfillmentStatus === "PROCESSING";
+          matchesFilter =
+            fulfillmentStatus === "PROCESSING";
           break;
+
         case "SHIPPED":
-          matchesFilter = fulfillmentStatus === "SHIPPED";
+          matchesFilter =
+            fulfillmentStatus === "SHIPPED";
           break;
+
         case "DELIVERED":
-          matchesFilter = fulfillmentStatus === "DELIVERED";
+          matchesFilter =
+            fulfillmentStatus === "DELIVERED";
           break;
+
         case "CANCELLED":
-          matchesFilter = fulfillmentStatus === "CANCELLED";
+          matchesFilter =
+            fulfillmentStatus === "CANCELLED";
           break;
+
+        case "INVENTORY_NONE":
+          matchesFilter = inventoryStatus === "NONE";
+          break;
+
+        case "INVENTORY_RESERVED":
+          matchesFilter =
+            inventoryStatus === "RESERVED";
+          break;
+
+        case "INVENTORY_COMMITTED":
+          matchesFilter =
+            inventoryStatus === "COMMITTED";
+          break;
+
+        case "INVENTORY_RELEASED":
+          matchesFilter =
+            inventoryStatus === "RELEASED";
+          break;
+
         default:
           break;
       }
@@ -225,7 +312,6 @@ export default function AdminOrdersPage() {
     (order) => order.status.toUpperCase() === "PENDING"
   ).length;
 
-  // Only paid orders should count as ready for fulfillment.
   const pendingFulfillmentOrders = orders.filter(
     (order) =>
       order.status.toUpperCase() === "PAID" &&
@@ -233,7 +319,8 @@ export default function AdminOrdersPage() {
   ).length;
 
   const deliveredOrders = orders.filter(
-    (order) => order.fulfillmentStatus.toUpperCase() === "DELIVERED"
+    (order) =>
+      order.fulfillmentStatus.toUpperCase() === "DELIVERED"
   ).length;
 
   return (
@@ -251,9 +338,8 @@ export default function AdminOrdersPage() {
                 <h1>Order Management</h1>
 
                 <p>
-                  Manage customer orders,
-                  payments and fulfillment
-                  from one place.
+                  Manage customer orders, payments and
+                  fulfillment from one place.
                 </p>
               </div>
 
@@ -261,8 +347,9 @@ export default function AdminOrdersPage() {
                 type="button"
                 className="orders-refresh"
                 onClick={loadOrders}
+                disabled={loading}
               >
-                ↻ Refresh Orders
+                ↻ {loading ? "Refreshing..." : "Refresh Orders"}
               </button>
             </div>
           </div>
@@ -273,67 +360,42 @@ export default function AdminOrdersPage() {
           <div className="container">
             <div className="orders-stats">
               <div className="orders-stat">
-                <div className="orders-stat-icon">
-                  🛒
-                </div>
-
+                <div className="orders-stat-icon">🛒</div>
                 <div>
                   <span>Total Orders</span>
-                  <strong>
-                    {orders.length}
-                  </strong>
+                  <strong>{orders.length}</strong>
                 </div>
               </div>
 
               <div className="orders-stat">
-                <div className="orders-stat-icon">
-                  ⏳
-                </div>
-
+                <div className="orders-stat-icon">⏳</div>
                 <div>
                   <span>Pending Payments</span>
-                  <strong>
-                    {pendingPaymentOrders}
-                  </strong>
+                  <strong>{pendingPaymentOrders}</strong>
                 </div>
               </div>
 
               <div className="orders-stat">
-                <div className="orders-stat-icon">
-                  💳
-                </div>
-
+                <div className="orders-stat-icon">💳</div>
                 <div>
                   <span>Paid Orders</span>
-                  <strong>
-                    {paidOrders}
-                  </strong>
+                  <strong>{paidOrders}</strong>
                 </div>
               </div>
 
               <div className="orders-stat">
-                <div className="orders-stat-icon">
-                  📦
-                </div>
-
+                <div className="orders-stat-icon">📦</div>
                 <div>
                   <span>Pending Fulfillment</span>
-                  <strong>
-                    {pendingFulfillmentOrders}
-                  </strong>
+                  <strong>{pendingFulfillmentOrders}</strong>
                 </div>
               </div>
 
               <div className="orders-stat">
-                <div className="orders-stat-icon">
-                  ✓
-                </div>
-
+                <div className="orders-stat-icon">✓</div>
                 <div>
                   <span>Delivered</span>
-                  <strong>
-                    {deliveredOrders}
-                  </strong>
+                  <strong>{deliveredOrders}</strong>
                 </div>
               </div>
             </div>
@@ -350,13 +412,8 @@ export default function AdminOrdersPage() {
                   <h2>All Orders</h2>
 
                   <p>
-                    {filteredOrders.length}{" "}
-                    order
-                    {filteredOrders.length !==
-                    1
-                      ? "s"
-                      : ""}{" "}
-                    found
+                    {filteredOrders.length} order
+                    {filteredOrders.length !== 1 ? "s" : ""} found
                   </p>
                 </div>
 
@@ -369,9 +426,7 @@ export default function AdminOrdersPage() {
                       placeholder="Search name, phone, order ID, or reference..."
                       value={search}
                       onChange={(event) =>
-                        setSearch(
-                          event.target.value
-                        )
+                        setSearch(event.target.value)
                       }
                     />
                   </div>
@@ -380,22 +435,19 @@ export default function AdminOrdersPage() {
                     value={filter}
                     onChange={(event) =>
                       setFilter(
-                        event.target.value
+                        event.target.value as InventoryFilter
                       )
                     }
                     className="orders-select"
+                    aria-label="Filter orders"
                   >
-                    <option value="ALL">
-                      All orders
-                    </option>
+                    <option value="ALL">All orders</option>
 
                     <optgroup label="Payment status">
                       <option value="PAYMENT_PENDING">
                         Payment pending
                       </option>
-                      <option value="PAYMENT_PAID">
-                        Paid
-                      </option>
+                      <option value="PAYMENT_PAID">Paid</option>
                       <option value="PAYMENT_FAILED">
                         Payment failed
                       </option>
@@ -408,14 +460,27 @@ export default function AdminOrdersPage() {
                       <option value="PROCESSING">
                         Processing
                       </option>
-                      <option value="SHIPPED">
-                        Shipped
-                      </option>
+                      <option value="SHIPPED">Shipped</option>
                       <option value="DELIVERED">
                         Delivered
                       </option>
                       <option value="CANCELLED">
                         Cancelled
+                      </option>
+                    </optgroup>
+
+                    <optgroup label="Inventory status">
+                      <option value="INVENTORY_NONE">
+                        No inventory record
+                      </option>
+                      <option value="INVENTORY_RESERVED">
+                        Reserved
+                      </option>
+                      <option value="INVENTORY_COMMITTED">
+                        Committed
+                      </option>
+                      <option value="INVENTORY_RELEASED">
+                        Released
                       </option>
                     </optgroup>
                   </select>
@@ -431,13 +496,10 @@ export default function AdminOrdersPage() {
                     <span />
                   </div>
 
-                  <h3>
-                    Loading orders...
-                  </h3>
+                  <h3>Loading orders...</h3>
 
                   <p>
-                    Getting the latest
-                    customer orders.
+                    Getting the latest customer orders.
                   </p>
                 </div>
               )}
@@ -445,13 +507,9 @@ export default function AdminOrdersPage() {
               {/* ERROR */}
               {!loading && error && (
                 <div className="orders-empty">
-                  <div className="orders-empty-icon">
-                    ⚠️
-                  </div>
+                  <div className="orders-empty-icon">⚠️</div>
 
-                  <h3>
-                    Unable to load orders
-                  </h3>
+                  <h3>Unable to load orders</h3>
 
                   <p>{error}</p>
 
@@ -468,20 +526,14 @@ export default function AdminOrdersPage() {
               {/* EMPTY */}
               {!loading &&
                 !error &&
-                filteredOrders.length ===
-                  0 && (
+                filteredOrders.length === 0 && (
                   <div className="orders-empty">
-                    <div className="orders-empty-icon">
-                      🛍️
-                    </div>
+                    <div className="orders-empty-icon">🛍️</div>
 
-                    <h3>
-                      No orders found
-                    </h3>
+                    <h3>No orders found</h3>
 
                     <p>
-                      Try changing your
-                      search or filter.
+                      Try changing your search or filter.
                     </p>
                   </div>
                 )}
@@ -489,8 +541,7 @@ export default function AdminOrdersPage() {
               {/* DESKTOP TABLE */}
               {!loading &&
                 !error &&
-                filteredOrders.length >
-                  0 && (
+                filteredOrders.length > 0 && (
                   <div className="orders-table-wrapper">
                     <table className="orders-table">
                       <thead>
@@ -506,119 +557,81 @@ export default function AdminOrdersPage() {
                       </thead>
 
                       <tbody>
-                        {filteredOrders.map(
-                          (order) => (
-                            <tr
-                              key={order.id}
-                            >
-                              <td>
-                                <div className="order-id">
-                                  {shortOrderId(
-                                    order.id
-                                  )}
+                        {filteredOrders.map((order) => (
+                          <tr key={order.id}>
+                            <td>
+                              <div className="order-id">
+                                {shortOrderId(order.id)}
+                              </div>
+
+                              <div className="order-item-count">
+                                {order.orderItems.length} item
+                                {order.orderItems.length !== 1
+                                  ? "s"
+                                  : ""}
+                              </div>
+                            </td>
+
+                            <td>
+                              <div className="order-customer">
+                                <div className="customer-avatar">
+                                  {order.customer
+                                    .charAt(0)
+                                    .toUpperCase()}
                                 </div>
 
-                                <div className="order-item-count">
-                                  {
-                                    order
-                                      .orderItems
-                                      .length
-                                  }{" "}
-                                  item
-                                  {order
-                                    .orderItems
-                                    .length !==
-                                  1
-                                    ? "s"
-                                    : ""}
+                                <div>
+                                  <strong>{order.customer}</strong>
+                                  <span>{order.email}</span>
                                 </div>
-                              </td>
+                              </div>
+                            </td>
 
-                              <td>
-                                <div className="order-customer">
-                                  <div className="customer-avatar">
-                                    {order.customer
-                                      .charAt(
-                                        0
-                                      )
-                                      .toUpperCase()}
-                                  </div>
+                            <td>
+                              <strong className="order-total">
+                                {formatNaira(order.total)}
+                              </strong>
+                            </td>
 
-                                  <div>
-                                    <strong>
-                                      {
-                                        order.customer
-                                      }
-                                    </strong>
+                            <td>
+                              <span
+                                className={getPaymentClass(
+                                  order.status
+                                )}
+                              >
+                                <i />
+                                {order.status}
+                              </span>
+                            </td>
 
-                                    <span>
-                                      {
-                                        order.email
-                                      }
-                                    </span>
-                                  </div>
-                                </div>
-                              </td>
+                            <td>
+                              <FulfillmentStatusSelect
+                                orderId={order.id}
+                                value={order.fulfillmentStatus}
+                                paymentStatus={order.status}
+                                onUpdated={handleFulfillmentUpdated}
+                              />
+                            </td>
 
-                              <td>
-                                <strong className="order-total">
-                                  {formatNaira(
-                                    order.total
-                                  )}
-                                </strong>
-                              </td>
+                            <td>
+                              <span className="order-date">
+                                {formatDate(order.createdAt)}
+                              </span>
+                            </td>
 
-                              <td>
-                                <span
-                                  className={getPaymentClass(
-                                    order.status
-                                  )}
-                                >
-                                  <i />
-                                  {
-                                    order.status
-                                  }
-                                </span>
-                              </td>
-
-                              <td>
-                                <FulfillmentStatusSelect
-                                  orderId={order.id}
-                                  value={order.fulfillmentStatus}
-                                  paymentStatus={order.status}
-                                  onUpdated={
-                                    handleFulfillmentUpdated
-                                  }
-                                />
-                              </td>
-
-                              <td>
-                                <span className="order-date">
-                                  {formatDate(
-                                    order.createdAt
-                                  )}
-                                </span>
-                              </td>
-
-                              <td>
-                                <button
-                                  type="button"
-                                  className="order-view-button"
-                                  onClick={() =>
-                                    setSelectedOrder(
-                                      order
-                                    )
-                                  }
-                                >
-                                  View
-                                  <span>
-                                    →
-                                  </span>
-                                </button>
-                              </td>
-                            </tr>
-                          )
-                        )}
+                            <td>
+                              <button
+                                type="button"
+                                className="order-view-button"
+                                onClick={() =>
+                                  setSelectedOrder(order)
+                                }
+                              >
+                                View <span>→</span>
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
                       </tbody>
                     </table>
                   </div>
@@ -627,95 +640,85 @@ export default function AdminOrdersPage() {
               {/* MOBILE CARDS */}
               {!loading &&
                 !error &&
-                filteredOrders.length >
-                  0 && (
+                filteredOrders.length > 0 && (
                   <div className="orders-mobile-list">
-                    {filteredOrders.map(
-                      (order) => (
-                        <div
-                          className="mobile-order-card"
-                          key={order.id}
-                        >
-                          <div className="mobile-order-top">
-                            <div>
-                              <strong>
-                                {shortOrderId(
-                                  order.id
-                                )}
-                              </strong>
-
-                              <span>
-                                {formatDate(
-                                  order.createdAt
-                                )}
-                              </span>
-                            </div>
-
+                    {filteredOrders.map((order) => (
+                      <div
+                        className="mobile-order-card"
+                        key={order.id}
+                      >
+                        <div className="mobile-order-top">
+                          <div>
                             <strong>
-                              {formatNaira(
-                                order.total
-                              )}
+                              {shortOrderId(order.id)}
                             </strong>
-                          </div>
 
-                          <div className="mobile-order-customer">
-                            <div className="customer-avatar">
-                              {order.customer
-                                .charAt(0)
-                                .toUpperCase()}
-                            </div>
-
-                            <div>
-                              <strong>
-                                {
-                                  order.customer
-                                }
-                              </strong>
-
-                              <span>
-                                {
-                                  order.email
-                                }
-                              </span>
-                            </div>
-                          </div>
-
-                          <div className="mobile-order-status">
-                            <span
-                              className={getPaymentClass(
-                                order.status
-                              )}
-                            >
-                              <i />
-                              {
-                                order.status
-                              }
+                            <span>
+                              {formatDate(order.createdAt)}
                             </span>
-
-                            <FulfillmentStatusSelect
-                              orderId={order.id}
-                              value={order.fulfillmentStatus}
-                              paymentStatus={order.status}
-                              onUpdated={
-                                handleFulfillmentUpdated
-                              }
-                            />
                           </div>
 
-                          <button
-                            type="button"
-                            className="mobile-order-view"
-                            onClick={() =>
-                              setSelectedOrder(
-                                order
-                              )
-                            }
-                          >
-                            View Order →
-                          </button>
+                          <strong>
+                            {formatNaira(order.total)}
+                          </strong>
                         </div>
-                      )
-                    )}
+
+                        <div className="mobile-order-customer">
+                          <div className="customer-avatar">
+                            {order.customer
+                              .charAt(0)
+                              .toUpperCase()}
+                          </div>
+
+                          <div>
+                            <strong>{order.customer}</strong>
+                            <span>{order.email}</span>
+                          </div>
+                        </div>
+
+                        <div className="mobile-order-status">
+                          <span
+                            className={getPaymentClass(
+                              order.status
+                            )}
+                          >
+                            <i />
+                            {order.status}
+                          </span>
+
+                          <FulfillmentStatusSelect
+                            orderId={order.id}
+                            value={order.fulfillmentStatus}
+                            paymentStatus={order.status}
+                            onUpdated={handleFulfillmentUpdated}
+                          />
+                        </div>
+
+                        <div className="mobile-inventory-status">
+                          <span>Inventory:</span>
+
+                          <span
+                            className={getInventoryClass(
+                              order.inventoryStatus
+                            )}
+                          >
+                            {getInventoryLabel(
+                              order.inventoryStatus
+                            )}
+                          </span>
+                        </div>
+
+                        <button
+                          type="button"
+                          className="mobile-order-view"
+                          onClick={() =>
+                            setSelectedOrder(order)
+                          }
+                        >
+                          View Order →
+                        </button>
+                      </div>
+                    ))}
                   </div>
                 )}
             </div>
@@ -727,39 +730,30 @@ export default function AdminOrdersPage() {
       {selectedOrder && (
         <div
           className="order-modal-backdrop"
-          onClick={() =>
-            setSelectedOrder(null)
-          }
+          onClick={() => setSelectedOrder(null)}
         >
           <div
             className="order-modal"
-            onClick={(event) =>
-              event.stopPropagation()
-            }
+            onClick={(event) => event.stopPropagation()}
           >
             <div className="order-modal-header">
               <div>
                 <span>
-                  {shortOrderId(
-                    selectedOrder.id
-                  )}
+                  {shortOrderId(selectedOrder.id)}
                 </span>
 
                 <h2>Order Details</h2>
 
                 <p>
-                  {formatDate(
-                    selectedOrder.createdAt
-                  )}
+                  {formatDate(selectedOrder.createdAt)}
                 </p>
               </div>
 
               <button
                 type="button"
                 className="order-modal-close"
-                onClick={() =>
-                  setSelectedOrder(null)
-                }
+                onClick={() => setSelectedOrder(null)}
+                aria-label="Close order details"
               >
                 ×
               </button>
@@ -770,13 +764,10 @@ export default function AdminOrdersPage() {
               <div className="order-detail-section">
                 <div className="order-detail-heading">
                   <span>👤</span>
+
                   <div>
-                    <h3>
-                      Customer Information
-                    </h3>
-                    <p>
-                      Customer details
-                    </p>
+                    <h3>Customer Information</h3>
+                    <p>Customer details</p>
                   </div>
                 </div>
 
@@ -788,19 +779,9 @@ export default function AdminOrdersPage() {
                   </div>
 
                   <div>
-                    <strong>
-                      {
-                        selectedOrder.customer
-                      }
-                    </strong>
-
-                    <span>
-                      {selectedOrder.email}
-                    </span>
-
-                    <span>
-                      {selectedOrder.phone}
-                    </span>
+                    <strong>{selectedOrder.customer}</strong>
+                    <span>{selectedOrder.email}</span>
+                    <span>{selectedOrder.phone}</span>
                   </div>
                 </div>
               </div>
@@ -811,21 +792,13 @@ export default function AdminOrdersPage() {
                   <span>📍</span>
 
                   <div>
-                    <h3>
-                      Delivery Address
-                    </h3>
-
-                    <p>
-                      Where the order should
-                      be delivered
-                    </p>
+                    <h3>Delivery Address</h3>
+                    <p>Where the order should be delivered</p>
                   </div>
                 </div>
 
                 <div className="order-address-card">
-                  {
-                    selectedOrder.address
-                  }
+                  {selectedOrder.address}
                 </div>
               </div>
 
@@ -835,20 +808,11 @@ export default function AdminOrdersPage() {
                   <span>🛍️</span>
 
                   <div>
-                    <h3>
-                      Ordered Products
-                    </h3>
+                    <h3>Ordered Products</h3>
 
                     <p>
-                      {
-                        selectedOrder
-                          .orderItems
-                          .length
-                      }{" "}
-                      product
-                      {selectedOrder
-                        .orderItems
-                        .length !== 1
+                      {selectedOrder.orderItems.length} product
+                      {selectedOrder.orderItems.length !== 1
                         ? "s"
                         : ""}
                     </p>
@@ -856,73 +820,49 @@ export default function AdminOrdersPage() {
                 </div>
 
                 <div className="order-products">
-                  {selectedOrder.orderItems.map(
-                    (item) => (
-                      <div
-                        className="order-product"
-                        key={item.id}
-                      >
-                        <img
-                          src={
-                            item.product
-                              .image
-                          }
-                          alt={
-                            item.product
-                              .name
-                          }
-                        />
+                  {selectedOrder.orderItems.map((item) => (
+                    <div
+                      className="order-product"
+                      key={item.id}
+                    >
+                      <img
+                        src={item.product.image}
+                        alt={item.product.name}
+                      />
 
-                        <div className="order-product-info">
-                          <strong>
-                            {
-                              item.product
-                                .name
-                            }
-                          </strong>
+                      <div className="order-product-info">
+                        <strong>{item.product.name}</strong>
 
-                          <span>
-                            {item.quantity} ×{" "}
-                            {formatNaira(
-                              item.price
-                            )}
-                          </span>
-                        </div>
-
-                        <strong>
-                          {formatNaira(
-                            item.price *
-                              item.quantity
-                          )}
-                        </strong>
+                        <span>
+                          {item.quantity} ×{" "}
+                          {formatNaira(item.price)}
+                        </span>
                       </div>
-                    )
-                  )}
+
+                      <strong>
+                        {formatNaira(
+                          item.price * item.quantity
+                        )}
+                      </strong>
+                    </div>
+                  ))}
                 </div>
               </div>
 
-              {/* PAYMENT */}
+              {/* PAYMENT AND INVENTORY */}
               <div className="order-detail-section">
                 <div className="order-detail-heading">
                   <span>💳</span>
 
                   <div>
-                    <h3>
-                      Payment Information
-                    </h3>
-
-                    <p>
-                      Payment and order
-                      information
-                    </p>
+                    <h3>Payment Information</h3>
+                    <p>Payment and order information</p>
                   </div>
                 </div>
 
                 <div className="payment-detail-card">
                   <div>
-                    <span>
-                      Payment Status
-                    </span>
+                    <span>Payment Status</span>
 
                     <strong>
                       <span
@@ -931,72 +871,61 @@ export default function AdminOrdersPage() {
                         )}
                       >
                         <i />
-                        {
-                          selectedOrder.status
-                        }
+                        {selectedOrder.status}
                       </span>
                     </strong>
                   </div>
-                  <div className="detail-item">
-  <span>Inventory Status</span>
-  <strong>{selectedOrder.inventoryStatus}</strong>
-</div>
 
                   <div>
-                    <span>
-                      Fulfillment
-                    </span>
+                    <span>Inventory Status</span>
+
+                    <strong>
+                      <span
+                        className={getInventoryClass(
+                          selectedOrder.inventoryStatus
+                        )}
+                      >
+                        {getInventoryLabel(
+                          selectedOrder.inventoryStatus
+                        )}
+                      </span>
+                    </strong>
+                  </div>
+
+                  <div>
+                    <span>Fulfillment</span>
 
                     <strong>
                       <FulfillmentStatusSelect
                         orderId={selectedOrder.id}
-                        value={
-                          selectedOrder.fulfillmentStatus
-                        }
-                        paymentStatus={
-                          selectedOrder.status
-                        }
-                        onUpdated={
-                          handleFulfillmentUpdated
-                        }
+                        value={selectedOrder.fulfillmentStatus}
+                        paymentStatus={selectedOrder.status}
+                        onUpdated={handleFulfillmentUpdated}
                       />
                     </strong>
                   </div>
 
                   {selectedOrder.paymentChannel && (
                     <div>
-                      <span>
-                        Payment Channel
-                      </span>
-
+                      <span>Payment Channel</span>
                       <strong>
-                        {
-                          selectedOrder.paymentChannel
-                        }
+                        {selectedOrder.paymentChannel}
                       </strong>
                     </div>
                   )}
 
                   {selectedOrder.paymentReference && (
                     <div>
-                      <span>
-                        Payment Reference
-                      </span>
-
+                      <span>Payment Reference</span>
                       <strong>
-                        {
-                          selectedOrder.paymentReference
-                        }
+                        {selectedOrder.paymentReference}
                       </strong>
                     </div>
                   )}
 
                   {selectedOrder.paidAt && (
                     <div>
-                      <span>
-                        Paid At
-                      </span>
-
+                      <span>Paid At</span>
                       <strong>
                         {formatDate(selectedOrder.paidAt)}
                       </strong>
@@ -1007,14 +936,10 @@ export default function AdminOrdersPage() {
 
               {/* TOTAL */}
               <div className="order-grand-total">
-                <span>
-                  Order Total
-                </span>
+                <span>Order Total</span>
 
                 <strong>
-                  {formatNaira(
-                    selectedOrder.total
-                  )}
+                  {formatNaira(selectedOrder.total)}
                 </strong>
               </div>
             </div>
