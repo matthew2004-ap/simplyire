@@ -22,6 +22,7 @@ type Order = {
   address: string;
   status: string;
   fulfillmentStatus: string;
+  inventoryStatus: string;
   total: number;
   paymentReference: string | null;
   paymentChannel: string | null;
@@ -936,6 +937,10 @@ export default function AdminOrdersPage() {
                       </span>
                     </strong>
                   </div>
+                  <div className="detail-item">
+  <span>Inventory Status</span>
+  <strong>{selectedOrder.inventoryStatus}</strong>
+</div>
 
                   <div>
                     <span>
