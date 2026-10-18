@@ -97,6 +97,8 @@ export default function AdminProductsPage() {
 
   const [form, setForm] =
     useState<ProductForm>(emptyForm);
+  const [imageSource, setImageSource] =
+    useState<"url" | "upload">("url");
 
   async function loadProducts() {
     try {
@@ -210,6 +212,7 @@ export default function AdminProductsPage() {
   function openCreateModal() {
     setEditingProduct(null);
     setForm(emptyForm);
+    setImageSource("url");
     setError("");
     setNotice("");
     setModalOpen(true);
@@ -228,6 +231,11 @@ export default function AdminProductsPage() {
       featured: product.featured,
       stock: String(product.stock),
     });
+    setImageSource(
+      product.image.startsWith("data:image/")
+        ? "upload"
+        : "url"
+    );
 
     setError("");
     setNotice("");
@@ -240,7 +248,71 @@ export default function AdminProductsPage() {
     setModalOpen(false);
     setEditingProduct(null);
     setForm(emptyForm);
+    setImageSource("url");
     setError("");
+  }
+
+  function handleImageSourceChange(
+    source: "url" | "upload"
+  ) {
+    setImageSource(source);
+    setForm((current) => ({
+      ...current,
+      image:
+        source === "upload"
+          ? current.image.startsWith("data:image/")
+            ? current.image
+            : ""
+          : current.image.startsWith("data:image/")
+            ? ""
+            : current.image,
+    }));
+    setError("");
+  }
+
+  function handleImageFileChange(
+    event: React.ChangeEvent<HTMLInputElement>
+  ) {
+    const file = event.target.files?.[0];
+
+    if (!file) return;
+
+    const allowedTypes = [
+      "image/jpeg",
+      "image/png",
+      "image/webp",
+    ];
+
+    if (!allowedTypes.includes(file.type)) {
+      setError("Choose a JPG, PNG, or WebP image.");
+      event.target.value = "";
+      return;
+    }
+
+    if (file.size > 2 * 1024 * 1024) {
+      setError("Choose an image smaller than 2 MB.");
+      event.target.value = "";
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const imageData = reader.result;
+      if (typeof imageData !== "string") {
+        setError("The selected image could not be read.");
+        return;
+      }
+
+      setForm((current) => ({
+        ...current,
+        image: imageData,
+      }));
+      setError("");
+    };
+    reader.onerror = () => {
+      setError("The selected image could not be read.");
+    };
+    reader.readAsDataURL(file);
   }
 
   function updateForm(
@@ -321,6 +393,7 @@ export default function AdminProductsPage() {
       setModalOpen(false);
       setEditingProduct(null);
       setForm(emptyForm);
+      setImageSource("url");
 
       await loadProducts();
     } catch (error) {
@@ -1181,34 +1254,72 @@ export default function AdminProductsPage() {
                 </div>
               </div>
 
-              <div
-                className={
-                  styles.field
-                }
-              >
-                <label>
-                  Image URL
-                </label>
+              <div className={styles.field}>
+                <label>Product Image</label>
 
-                <input
-                  type="url"
-                  value={form.image}
-                  onChange={(event) =>
-                    updateForm(
-                      "image",
-                      event.target.value
-                    )
-                  }
-                  placeholder="https://..."
-                  required
-                />
-
-                {form.image && (
-                  <div
+                <div
+                  className={styles.imageSourceOptions}
+                  role="group"
+                  aria-label="Choose how to add a product image"
+                >
+                  <button
+                    type="button"
                     className={
-                      styles.imagePreview
+                      imageSource === "url"
+                        ? `${styles.imageSourceButton} ${styles.imageSourceActive}`
+                        : styles.imageSourceButton
+                    }
+                    aria-pressed={imageSource === "url"}
+                    onClick={() =>
+                      handleImageSourceChange("url")
                     }
                   >
+                    Enter image URL
+                  </button>
+                  <button
+                    type="button"
+                    className={
+                      imageSource === "upload"
+                        ? `${styles.imageSourceButton} ${styles.imageSourceActive}`
+                        : styles.imageSourceButton
+                    }
+                    aria-pressed={imageSource === "upload"}
+                    onClick={() =>
+                      handleImageSourceChange("upload")
+                    }
+                  >
+                    Upload from this device
+                  </button>
+                </div>
+
+                {imageSource === "url" ? (
+                  <input
+                    type="url"
+                    value={form.image}
+                    onChange={(event) =>
+                      updateForm("image", event.target.value)
+                    }
+                    placeholder="https://..."
+                    aria-label="Product image URL"
+                    required
+                  />
+                ) : (
+                  <>
+                    <input
+                      type="file"
+                      accept="image/jpeg,image/png,image/webp"
+                      onChange={handleImageFileChange}
+                      aria-label="Choose product image from this device"
+                      required={!form.image}
+                    />
+                    <small>
+                      JPG, PNG, or WebP; maximum file size 2 MB.
+                    </small>
+                  </>
+                )}
+
+                {form.image && (
+                  <div className={styles.imagePreview}>
                     <img
                       src={form.image}
                       alt="Product preview"

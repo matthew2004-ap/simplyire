@@ -719,6 +719,30 @@
   font-size: 9px;
 }
 
+.imageSourceOptions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 9px;
+}
+
+.imageSourceButton {
+  border: 1px solid #e6d5dc;
+  border-radius: 9px;
+  background: white;
+  padding: 9px 12px;
+  color: #765b66;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.imageSourceActive {
+  border-color: #c66686;
+  background: #fff0f5;
+  color: #a24768;
+}
+
 .imagePreview {
   margin-top: 9px;
 }

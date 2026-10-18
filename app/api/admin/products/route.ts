@@ -2,6 +2,36 @@ import { NextResponse } from "next/server";
 import { getSession } from "@/lib/auth";
 import { db } from "@/lib/db";
 
+const MAX_PRODUCT_IMAGE_BYTES = 2 * 1024 * 1024;
+
+function getImageValidationError(image: unknown) {
+  if (typeof image !== "string" || !image.trim()) {
+    return "Please provide all required product information.";
+  }
+
+  if (image.startsWith("data:")) {
+    const match = /^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/]+={0,2})$/.exec(image);
+
+    if (!match) {
+      return "Uploaded images must be JPG, PNG, or WebP.";
+    }
+
+    const base64 = match[2];
+    const padding = base64.endsWith("==")
+      ? 2
+      : base64.endsWith("=")
+        ? 1
+        : 0;
+    const imageBytes = Math.floor((base64.length * 3) / 4) - padding;
+
+    if (imageBytes > MAX_PRODUCT_IMAGE_BYTES) {
+      return "Uploaded images must be no larger than 2 MB.";
+    }
+  }
+
+  return null;
+}
+
 async function requireAdmin() {
   const session = await getSession();
 
@@ -102,17 +132,19 @@ export async function POST(request: Request) {
       stock,
     } = body;
 
+    const imageError = getImageValidationError(image);
+
     if (
       !slug?.trim() ||
       !name?.trim() ||
       !category?.trim() ||
       !description?.trim() ||
-      !image?.trim()
+      imageError
     ) {
       return NextResponse.json(
         {
           success: false,
-          message:
+          message: imageError ||
             "Please provide all required product information.",
         },
         { status: 400 }
@@ -263,17 +295,19 @@ export async function PUT(request: Request) {
       );
     }
 
+    const imageError = getImageValidationError(image);
+
     if (
       !slug?.trim() ||
       !name?.trim() ||
       !category?.trim() ||
       !description?.trim() ||
-      !image?.trim()
+      imageError
     ) {
       return NextResponse.json(
         {
           success: false,
-          message:
+          message: imageError ||
             "Please provide all required product information.",
         },
         { status: 400 }
