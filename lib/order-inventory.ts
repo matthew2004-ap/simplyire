@@ -579,12 +579,9 @@ export async function reconcileExpiredReservations(
         );
       }
 
-      if (
-        payment.metadata?.orderId &&
-        payment.metadata.orderId !== order.id
-      ) {
+      if (payment.metadata?.orderId ?? order.id) {
         throw new Error(
-          "Paystack metadata does not match the order.",
+          "Paystack metadata is missing or does not match the order.",
         );
       }
 
@@ -597,12 +594,9 @@ export async function reconcileExpiredReservations(
         );
       }
 
-      if (
-        payment.currency &&
-        payment.currency.toUpperCase() !== "NGN"
-      ) {
+      if (payment.currency?.toUpperCase() !== "NGN") {
         throw new Error(
-          "Paystack currency is not NGN.",
+          "Paystack currency is missing or is not NGN.",
         );
       }
 
