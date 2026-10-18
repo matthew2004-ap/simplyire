@@ -5,13 +5,40 @@ import { useEffect, useState } from "react";
 import { useCart } from "@/context/CartContext";
 import { formatNaira } from "@/lib/utils";
 
-export default function CheckoutPage() {
-  const {
-    items,
-    subtotal,
-  } = useCart();
+type CheckoutForm = {
+  name: string;
+  email: string;
+  phone: string;
+  address: string;
+  city: string;
+  state: string;
+};
 
-  const [form, setForm] = useState({
+type OrderResponse = {
+  success: boolean;
+  message?: string;
+  order?: {
+    id: string;
+    total: number;
+    status: string;
+    fulfillmentStatus?: string;
+    inventoryStatus?: string;
+    reservationExpiresAt?: string | null;
+  };
+};
+
+type PaymentResponse = {
+  success: boolean;
+  message?: string;
+  authorizationUrl?: string;
+  accessCode?: string;
+  reference?: string;
+};
+
+export default function CheckoutPage() {
+  const { items, subtotal } = useCart();
+
+  const [form, setForm] = useState<CheckoutForm>({
     name: "",
     email: "",
     phone: "",
@@ -23,6 +50,9 @@ export default function CheckoutPage() {
   const [loading, setLoading] = useState(false);
   const [profilePrefilled, setProfilePrefilled] = useState(false);
 
+  const deliveryFee = subtotal >= 50000 ? 0 : 2500;
+  const total = subtotal + deliveryFee;
+
   useEffect(() => {
     let active = true;
 
@@ -33,10 +63,15 @@ export default function CheckoutPage() {
         });
 
         if (!response.ok) return;
+
         const data = await response.json();
-        if (!active || !data.success || !data.profile) return;
+
+        if (!active || !data.success || !data.profile) {
+          return;
+        }
 
         const profile = data.profile;
+
         setForm((current) => ({
           ...current,
           name: current.name || profile.name || "",
@@ -46,6 +81,7 @@ export default function CheckoutPage() {
           city: current.city || profile.city || "",
           state: current.state || profile.state || "",
         }));
+
         setProfilePrefilled(true);
       } catch {
         // Guest checkout remains available if no profile exists.
@@ -53,17 +89,15 @@ export default function CheckoutPage() {
     }
 
     void prefillFromProfile();
-    return () => { active = false; };
-  }, []);
 
-  const deliveryFee = subtotal >= 50000 ? 0 : 2500;
-  const total = subtotal + deliveryFee;
+    return () => {
+      active = false;
+    };
+  }, []);
 
   function handleChange(
     event: React.ChangeEvent<
-      HTMLInputElement |
-        HTMLTextAreaElement |
-        HTMLSelectElement
+      HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement
     >
   ) {
     const { name, value } = event.target;
@@ -79,98 +113,151 @@ export default function CheckoutPage() {
   ) {
     event.preventDefault();
 
+    if (loading) return;
+
     if (items.length === 0) {
-      alert("Your cart is empty.");
+      alert("Your cart is empty. Please add products before checkout.");
       return;
     }
 
     setLoading(true);
 
     try {
-      const response = await fetch("/api/orders", {
+      /*
+       * STEP 1:
+       * Create the order on the server.
+       */
+      const orderResponse = await fetch("/api/orders", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          customer: form.name,
-          email: form.email,
-          phone: form.phone,
-          address: form.address,
-          city: form.city,
-          state: form.state,
+          customer: form.name.trim(),
+          email: form.email.trim(),
+          phone: form.phone.trim(),
+          address: form.address.trim(),
+          city: form.city.trim(),
+          state: form.state.trim(),
           items: items.map((item) => ({
             productId: item.id,
             quantity: item.quantity,
           })),
         }),
+        cache: "no-store",
       });
 
-      const data = await response.json();
+      const orderData =
+        (await orderResponse.json().catch(() => null)) as
+          | OrderResponse
+          | null;
 
-      if (!response.ok || !data.success) {
+      if (
+        !orderResponse.ok ||
+        !orderData?.success ||
+        !orderData.order?.id
+      ) {
         throw new Error(
-          data.message || "Failed to create order."
+          orderData?.message || "Unable to create your order."
         );
       }
 
-    sessionStorage.setItem(
-  "simplyire-last-order",
-  JSON.stringify({
-    orderId: data.order.id,
-    total: data.order.total,
-    customer: form.name,
-    email: form.email,
-  })
-);
+      const order = orderData.order;
 
-// Initialize Paystack payment
-const paymentResponse = await fetch(
-  "/api/payments/initialize",
-  {
-    method: "POST",
+      /*
+       * STEP 2:
+       * Save basic order details for the callback and
+       * order-success pages.
+       *
+       * Storage failure must not prevent payment from
+       * continuing.
+       */
+      try {
+        sessionStorage.setItem(
+          "simplyire-last-order",
+          JSON.stringify({
+            id: order.id,
+            orderId: order.id,
+            total: order.total,
+            status: order.status,
+            customer: form.name.trim(),
+            email: form.email.trim(),
+          })
+        );
+      } catch (storageError) {
+        console.warn(
+          "Could not save order details in session storage:",
+          storageError
+        );
+      }
 
-    headers: {
-      "Content-Type": "application/json",
-    },
+      /*
+       * STEP 3:
+       * Initialize Paystack payment.
+       */
+      const paymentResponse = await fetch(
+        "/api/payments/initialize",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            orderId: order.id,
+          }),
+          cache: "no-store",
+        }
+      );
 
-    body: JSON.stringify({
-      orderId: data.order.id,
-    }),
-  }
-);
+      const paymentData =
+        (await paymentResponse.json().catch(() => null)) as
+          | PaymentResponse
+          | null;
 
-const paymentData =
-  await paymentResponse.json();
+      if (
+        !paymentResponse.ok ||
+        !paymentData?.success
+      ) {
+        throw new Error(
+          paymentData?.message ||
+            "Unable to initialize payment. Please contact support if your order was created."
+        );
+      }
 
-if (
-  !paymentResponse.ok ||
-  !paymentData.success
-) {
-  throw new Error(
-    paymentData.message ||
-      "Unable to initialize payment."
-  );
-}
+      /*
+       * STEP 4:
+       * Confirm that the server returned a valid HTTPS
+       * Paystack authorization URL.
+       *
+       * The initialize API returns authorizationUrl
+       * at the top level, not inside payment.
+       */
+      const authorizationUrl = paymentData.authorizationUrl;
 
-// Send customer to Paystack
-// Send customer to Paystack
-if (!paymentData.authorizationUrl) {
-  throw new Error(
-    "Paystack did not return a payment authorization URL."
-  );
-}
+      if (
+        typeof authorizationUrl !== "string" ||
+        !authorizationUrl.startsWith("https://")
+      ) {
+        throw new Error(
+          "The payment link was not returned correctly. Please contact support before creating another order."
+        );
+      }
 
-window.location.assign(
-  paymentData.authorizationUrl
-);
+      /*
+       * STEP 5:
+       * Redirect the customer to Paystack.
+       *
+       * This works with normal mobile and desktop
+       * browser navigation.
+       */
+      window.location.assign(authorizationUrl);
     } catch (error) {
       console.error("Checkout error:", error);
 
       alert(
         error instanceof Error
           ? error.message
-          : "Something went wrong while creating your order."
+          : "Something went wrong during checkout. Please try again."
       );
     } finally {
       setLoading(false);
@@ -182,24 +269,18 @@ window.location.assign(
       <div className="page">
         <section className="page-hero">
           <div className="container">
-            <span className="eyebrow">
-              Checkout
-            </span>
+            <span className="eyebrow">Checkout</span>
 
             <h1>Your cart is empty.</h1>
 
             <p>
-              Add some products before continuing
-              to checkout.
+              Add some products before continuing to checkout.
             </p>
           </div>
         </section>
 
         <section className="section container">
-          <Link
-            href="/shop"
-            className="btn btn-primary"
-          >
+          <Link href="/shop" className="btn btn-primary">
             Continue Shopping
           </Link>
         </section>
@@ -212,9 +293,7 @@ window.location.assign(
       {/* Checkout Header */}
       <section className="page-hero">
         <div className="container">
-          <span className="eyebrow">
-            Checkout
-          </span>
+          <span className="eyebrow">Checkout</span>
 
           <h1>Complete your order.</h1>
 
@@ -227,7 +306,6 @@ window.location.assign(
       {/* Checkout Content */}
       <section className="section container">
         <div className="checkout-layout">
-
           {/* Customer Form */}
           <form
             className="checkout-form"
@@ -235,12 +313,15 @@ window.location.assign(
           >
             {/* Customer Information */}
             <div className="checkout-card">
-              <h2>
-                Customer information
-              </h2>
+              <h2>Customer information</h2>
+
               {profilePrefilled && (
                 <p className="checkout-profile-note">
-                  We filled in details from your saved profile. You can change them for this order. <Link href="/profile">Edit your profile</Link>
+                  We filled in details from your saved profile.
+                  You can change them for this order.{" "}
+                  <Link href="/profile">
+                    Edit your profile
+                  </Link>
                 </p>
               )}
 
@@ -256,6 +337,7 @@ window.location.assign(
                   value={form.name}
                   onChange={handleChange}
                   placeholder="Enter your full name"
+                  autoComplete="name"
                   required
                 />
               </div>
@@ -273,6 +355,7 @@ window.location.assign(
                     value={form.email}
                     onChange={handleChange}
                     placeholder="you@example.com"
+                    autoComplete="email"
                     required
                   />
                 </div>
@@ -289,6 +372,7 @@ window.location.assign(
                     value={form.phone}
                     onChange={handleChange}
                     placeholder="08012345678"
+                    autoComplete="tel"
                     required
                   />
                 </div>
@@ -297,9 +381,7 @@ window.location.assign(
 
             {/* Delivery Information */}
             <div className="checkout-card">
-              <h2>
-                Delivery information
-              </h2>
+              <h2>Delivery information</h2>
 
               <div className="form-group">
                 <label htmlFor="address">
@@ -312,6 +394,7 @@ window.location.assign(
                   value={form.address}
                   onChange={handleChange}
                   placeholder="Enter your full delivery address"
+                  autoComplete="street-address"
                   rows={4}
                   required
                 />
@@ -330,6 +413,7 @@ window.location.assign(
                     value={form.city}
                     onChange={handleChange}
                     placeholder="e.g. Ilorin"
+                    autoComplete="address-level2"
                     required
                   />
                 </div>
@@ -344,47 +428,22 @@ window.location.assign(
                     name="state"
                     value={form.state}
                     onChange={handleChange}
+                    autoComplete="address-level1"
                     required
                   >
                     <option value="">
                       Select state
                     </option>
 
-                    <option value="Kwara">
-                      Kwara
-                    </option>
-
-                    <option value="Lagos">
-                      Lagos
-                    </option>
-
-                    <option value="Abuja">
-                      FCT Abuja
-                    </option>
-
-                    <option value="Oyo">
-                      Oyo
-                    </option>
-
-                    <option value="Rivers">
-                      Rivers
-                    </option>
-
-                    <option value="Ogun">
-                      Ogun
-                    </option>
-
-                    <option value="Kaduna">
-                      Kaduna
-                    </option>
-
-                    <option value="Enugu">
-                      Enugu
-                    </option>
-
-                    <option value="Other">
-                      Other
-                    </option>
+                    <option value="Kwara">Kwara</option>
+                    <option value="Lagos">Lagos</option>
+                    <option value="Abuja">FCT Abuja</option>
+                    <option value="Oyo">Oyo</option>
+                    <option value="Rivers">Rivers</option>
+                    <option value="Ogun">Ogun</option>
+                    <option value="Kaduna">Kaduna</option>
+                    <option value="Enugu">Enugu</option>
+                    <option value="Other">Other</option>
                   </select>
                 </div>
               </div>
@@ -398,9 +457,7 @@ window.location.assign(
             >
               {loading
                 ? "Processing..."
-                : `Continue to payment · ${formatNaira(
-                    total
-                  )}`}
+                : `Continue to payment · ${formatNaira(total)}`}
             </button>
           </form>
 
@@ -420,9 +477,7 @@ window.location.assign(
                   />
 
                   <div>
-                    <strong>
-                      {item.name}
-                    </strong>
+                    <strong>{item.name}</strong>
 
                     <span>
                       {item.quantity} ×{" "}
@@ -432,8 +487,7 @@ window.location.assign(
 
                   <strong>
                     {formatNaira(
-                      item.price *
-                        item.quantity
+                      item.price * item.quantity
                     )}
                   </strong>
                 </div>
@@ -456,9 +510,7 @@ window.location.assign(
               <strong>
                 {deliveryFee === 0
                   ? "FREE"
-                  : formatNaira(
-                      deliveryFee
-                    )}
+                  : formatNaira(deliveryFee)}
               </strong>
             </div>
 

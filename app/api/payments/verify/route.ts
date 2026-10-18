@@ -3,6 +3,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { settlePaidOrder } from "@/lib/order-inventory";
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 const PAYSTACK_VERIFY_URL =
   "https://api.paystack.co/transaction/verify";
 
@@ -23,17 +26,35 @@ type PaystackVerification = {
   };
 };
 
+function jsonResponse(
+  body: Record<string, unknown>,
+  status = 200,
+) {
+  return NextResponse.json(body, {
+    status,
+    headers: {
+      "Cache-Control": "no-store, max-age=0",
+    },
+  });
+}
+
 export async function GET(request: NextRequest) {
   try {
     const secretKey = process.env.PAYSTACK_SECRET_KEY;
 
     if (!secretKey) {
-      return NextResponse.json(
+      console.error(
+        "PAYSTACK_SECRET_KEY is not configured.",
+      );
+
+      return jsonResponse(
         {
           success: false,
-          message: "Payment service is not configured.",
+          paid: false,
+          message:
+            "The payment service is temporarily unavailable.",
         },
-        { status: 500 },
+        500,
       );
     }
 
@@ -42,17 +63,24 @@ export async function GET(request: NextRequest) {
       ?.trim();
 
     if (!reference) {
-      return NextResponse.json(
+      return jsonResponse(
         {
           success: false,
+          paid: false,
           message: "Payment reference is required.",
         },
-        { status: 400 },
+        400,
       );
     }
 
+    /*
+     * STEP 1:
+     * Verify the transaction directly with Paystack.
+     */
     const response = await fetch(
-      `${PAYSTACK_VERIFY_URL}/${encodeURIComponent(reference)}`,
+      `${PAYSTACK_VERIFY_URL}/${encodeURIComponent(
+        reference,
+      )}`,
       {
         method: "GET",
         headers: {
@@ -60,150 +88,190 @@ export async function GET(request: NextRequest) {
           Accept: "application/json",
         },
         cache: "no-store",
+        signal: AbortSignal.timeout(15000),
       },
     );
 
     const result =
-      (await response.json().catch(() => null)) as
+      (await response
+        .json()
+        .catch(() => null)) as
         | PaystackVerification
         | null;
 
     if (
       !response.ok ||
-      !result?.status ||
+      result?.status !== true ||
       !result.data
     ) {
       console.error(
         "Paystack verification request failed:",
-        result,
+        {
+          httpStatus: response.status,
+          message: result?.message,
+        },
       );
 
-      return NextResponse.json(
+      return jsonResponse(
         {
           success: false,
+          paid: false,
           message:
-            result?.message ||
-            "Unable to verify payment with Paystack.",
+            "We could not verify your payment right now. Please try verification again.",
         },
-        { status: 502 },
+        502,
       );
     }
 
     const payment = result.data;
 
-    // Confirm that Paystack returned the requested reference.
+    /*
+     * STEP 2:
+     * Verify that Paystack returned the exact reference
+     * supplied by the customer.
+     */
     if (payment.reference !== reference) {
-      return NextResponse.json(
+      return jsonResponse(
         {
           success: false,
-          message: "Payment reference does not match.",
+          paid: false,
+          message:
+            "The payment reference does not match.",
         },
-        { status: 400 },
+        400,
       );
     }
 
-    if (!payment.metadata?.orderId) {
-      return NextResponse.json(
+    /*
+     * STEP 3:
+     * Find the order linked to this transaction.
+     */
+    const orderId = payment.metadata?.orderId;
+
+    if (!orderId) {
+      return jsonResponse(
         {
           success: false,
+          paid: false,
           message:
-            "The payment response does not contain an order ID.",
+            "The transaction is not linked to an order.",
         },
-        { status: 400 },
+        400,
       );
     }
 
     const order = await db.order.findUnique({
       where: {
-        id: payment.metadata.orderId,
+        id: orderId,
       },
     });
 
     if (!order) {
-      return NextResponse.json(
+      return jsonResponse(
         {
           success: false,
-          message: "Order not found.",
+          paid: false,
+          message: "The order could not be found.",
         },
-        { status: 404 },
+        404,
       );
     }
 
     /*
-     * Match the verified reference against the reference stored
-     * on this order. Do not accept another order's transaction.
+     * STEP 4:
+     * Confirm that this reference belongs to this order.
      */
     if (order.paymentReference !== reference) {
-      return NextResponse.json(
+      return jsonResponse(
         {
           success: false,
+          paid: false,
           message:
-            "The payment reference does not match this order.",
+            "The payment reference does not match the order.",
         },
-        { status: 400 },
+        400,
       );
     }
 
-    if (
-      payment.metadata.orderId !== order.id
-    ) {
-      return NextResponse.json(
+    if (payment.metadata?.orderId !== order.id) {
+      return jsonResponse(
         {
           success: false,
+          paid: false,
           message:
-            "Payment metadata does not match the order.",
+            "The transaction metadata does not match the order.",
         },
-        { status: 400 },
+        400,
       );
     }
 
-    // Paystack amounts are expressed in kobo for NGN transactions.
+    /*
+     * STEP 5:
+     * Validate the transaction amount.
+     *
+     * Paystack expects amounts in kobo for NGN.
+     */
     if (
       typeof payment.amount !== "number" ||
       payment.amount !== order.total * 100
     ) {
-      return NextResponse.json(
+      return jsonResponse(
         {
           success: false,
+          paid: false,
           message:
             "The verified payment amount does not match the order total.",
         },
-        { status: 400 },
-      );
-    }
-
-    if (
-      !payment.currency ||
-      payment.currency.toUpperCase() !== "NGN"
-    ) {
-      return NextResponse.json(
-        {
-          success: false,
-          message:
-            "The payment currency does not match NGN.",
-        },
-        { status: 400 },
+        400,
       );
     }
 
     /*
-     * Only Paystack's verified "success" status can mark the
-     * order as paid.
+     * STEP 6:
+     * Validate the currency.
+     */
+    if (
+      payment.currency?.toUpperCase() !== "NGN"
+    ) {
+      return jsonResponse(
+        {
+          success: false,
+          paid: false,
+          message:
+            "The payment currency does not match NGN.",
+        },
+        400,
+      );
+    }
+
+    /*
+     * STEP 7:
+     * Do not mark pending, failed, or abandoned transactions
+     * as paid.
+     *
+     * The callback can retry while Paystack processes payment.
      */
     if (payment.status !== "success") {
-      return NextResponse.json({
+      return jsonResponse({
         success: true,
         paid: false,
         status: payment.status ?? "unknown",
-        message: "Payment has not been confirmed.",
+        message:
+          payment.status === "failed" ||
+          payment.status === "abandoned"
+            ? "Paystack has not confirmed a successful payment. Please check your transaction before trying again."
+            : "Your payment is still being processed. Please retry verification shortly.",
         reference,
         orderId: order.id,
       });
     }
 
     /*
-     * The order inventory helper commits stock transactionally
-     * and avoids deducting inventory twice for an already-paid order.
+     * STEP 8:
+     * Settle inventory only after successful verification.
+     *
+     * The inventory helper also checks whether the order
+     * has already been committed.
      */
     await settlePaidOrder(order.id, {
       reference,
@@ -211,6 +279,10 @@ export async function GET(request: NextRequest) {
       paidAt: payment.paid_at ?? null,
     });
 
+    /*
+     * STEP 9:
+     * Read the order again to confirm the final state.
+     */
     const updatedOrder = await db.order.findUnique({
       where: {
         id: order.id,
@@ -227,7 +299,36 @@ export async function GET(request: NextRequest) {
       },
     });
 
-    return NextResponse.json({
+    if (
+      !updatedOrder ||
+      updatedOrder.status !== "PAID"
+    ) {
+      console.error(
+        "Payment was verified, but the order is not marked as paid.",
+        {
+          orderId: order.id,
+          reference,
+        },
+      );
+
+      return jsonResponse(
+        {
+          success: false,
+          paid: false,
+          message:
+            "Your payment was verified, but order confirmation is still processing. Please retry verification.",
+          reference,
+          orderId: order.id,
+        },
+        503,
+      );
+    }
+
+    /*
+     * STEP 10:
+     * Return the response expected by the callback page.
+     */
+    return jsonResponse({
       success: true,
       paid: true,
       message: "Payment verified successfully.",
@@ -240,15 +341,19 @@ export async function GET(request: NextRequest) {
       error,
     );
 
-    return NextResponse.json(
+    const timedOut =
+      error instanceof Error &&
+      error.name === "TimeoutError";
+
+    return jsonResponse(
       {
         success: false,
-        message:
-          error instanceof Error
-            ? error.message
-            : "An unexpected verification error occurred.",
+        paid: false,
+        message: timedOut
+          ? "Payment verification timed out. Please retry verification."
+          : "We could not complete payment verification. Please retry shortly.",
       },
-      { status: 500 },
+      timedOut ? 504 : 500,
     );
   }
 }

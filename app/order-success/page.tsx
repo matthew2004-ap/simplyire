@@ -7,7 +7,7 @@ type OrderData = {
   id: string;
   total: number;
   status: string;
-  paymentReference?: string;
+  paymentReference?: string | null;
 };
 
 function formatNaira(amount: number) {
@@ -23,32 +23,147 @@ function shortOrderId(id: string) {
 }
 
 export default function OrderSuccessPage() {
-  const [order, setOrder] =
-    useState<OrderData | null>(null);
-
-  const [loading, setLoading] =
-    useState(true);
+  const [order, setOrder] = useState<OrderData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [message, setMessage] = useState("");
 
   useEffect(() => {
-    try {
-      const saved =
-        sessionStorage.getItem(
-          "simplyire-last-order"
+    let cancelled = false;
+
+    async function loadOrder() {
+      try {
+        /*
+         * Read the order information saved by the payment callback.
+         */
+        let savedOrder: OrderData | null = null;
+
+        try {
+          const saved = sessionStorage.getItem(
+            "simplyire-last-order",
+          );
+
+          if (saved) {
+            const parsed: unknown = JSON.parse(saved);
+
+            if (
+              parsed &&
+              typeof parsed === "object" &&
+              "id" in parsed &&
+              typeof parsed.id === "string" &&
+              "paymentReference" in parsed &&
+              typeof parsed.paymentReference === "string"
+            ) {
+              savedOrder = parsed as OrderData;
+            }
+          }
+        } catch (storageError) {
+          console.warn(
+            "Could not read saved order information:",
+            storageError,
+          );
+        }
+
+        if (!savedOrder?.id || !savedOrder.paymentReference) {
+          if (!cancelled) {
+            setMessage(
+              "We couldn't retrieve your payment confirmation. Please return to the payment callback or contact Simplyire support.",
+            );
+          }
+
+          return;
+        }
+
+        /*
+         * Independently ask the server to verify the payment.
+         * Do not trust browser storage as proof of payment.
+         */
+        const response = await fetch(
+          `/api/payments/verify?reference=${encodeURIComponent(
+            savedOrder.paymentReference,
+          )}`,
+          {
+            method: "GET",
+            cache: "no-store",
+            headers: {
+              Accept: "application/json",
+            },
+            signal: AbortSignal.timeout(15000),
+          },
         );
 
-      if (saved) {
-        // Read browser storage after hydration to avoid server/client mismatch.
-        // eslint-disable-next-line react-hooks/set-state-in-effect
-        setOrder(JSON.parse(saved));
+        const data = await response.json().catch(() => null);
+
+        if (
+          !response.ok ||
+          data?.success !== true ||
+          data?.paid !== true ||
+          !data?.order ||
+          data.order.id !== savedOrder.id ||
+          data.order.status !== "PAID"
+        ) {
+          if (!cancelled) {
+            setMessage(
+              "Your payment has not been confirmed on this page yet. Please retry verification before attempting another payment.",
+            );
+          }
+
+          return;
+        }
+
+        const verifiedOrder: OrderData = {
+          id: data.order.id,
+          total: data.order.total,
+          status: data.order.status,
+          paymentReference:
+            data.reference || savedOrder.paymentReference,
+        };
+
+        if (!cancelled) {
+          setOrder(verifiedOrder);
+        }
+
+        /*
+         * Update local storage only after server confirmation.
+         */
+        try {
+          sessionStorage.setItem(
+            "simplyire-last-order",
+            JSON.stringify(verifiedOrder),
+          );
+
+          sessionStorage.setItem(
+            "simplyire-payment-verified",
+            "true",
+          );
+        } catch (storageError) {
+          console.warn(
+            "Could not update saved order information:",
+            storageError,
+          );
+        }
+      } catch (error) {
+        console.error(
+          "Order confirmation error:",
+          error,
+        );
+
+        if (!cancelled) {
+          setMessage(
+            "We couldn't confirm your order right now. Check your connection and retry verification.",
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
-    } catch (error) {
-      console.error(
-        "Failed to load order:",
-        error
-      );
-    } finally {
-      setLoading(false);
     }
+
+    void loadOrder();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   if (loading) {
@@ -59,10 +174,13 @@ export default function OrderSuccessPage() {
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
+          padding: "30px",
           background: "#fff9fb",
         }}
       >
-        <p>Loading your order...</p>
+        <p style={{ color: "#907b84" }}>
+          Verifying your payment and loading your order...
+        </p>
       </main>
     );
   }
@@ -75,7 +193,7 @@ export default function OrderSuccessPage() {
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          padding: "30px",
+          padding: "30px 20px",
           background: "#fff9fb",
         }}
       >
@@ -83,23 +201,78 @@ export default function OrderSuccessPage() {
           style={{
             width: "100%",
             maxWidth: "520px",
-            padding: "40px",
+            padding: "40px 25px",
             borderRadius: "22px",
             background: "#fff",
             border: "1px solid #eedde4",
             textAlign: "center",
+            boxShadow:
+              "0 15px 45px rgba(88, 40, 59, 0.08)",
           }}
         >
-          <h1>Order Information</h1>
+          <h1
+            style={{
+              color: "#3b2932",
+              fontSize: "24px",
+            }}
+          >
+            Order Confirmation
+          </h1>
 
-          <p>
-            We couldn&apos;t find the recently
-            completed order.
+          <p
+            role="status"
+            style={{
+              color: "#907b84",
+              lineHeight: 1.7,
+              fontSize: "14px",
+            }}
+          >
+            {message ||
+              "We couldn't retrieve your order confirmation."}
           </p>
 
-          <Link href="/shop">
-            Return to Shop
-          </Link>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "center",
+              gap: "12px",
+              flexWrap: "wrap",
+              marginTop: "24px",
+            }}
+          >
+            <Link
+              href="/shop"
+              style={{
+                display: "inline-block",
+                borderRadius: "10px",
+                background: "#c66686",
+                padding: "12px 17px",
+                color: "#fff",
+                fontSize: "12px",
+                fontWeight: 800,
+                textDecoration: "none",
+              }}
+            >
+              Return to Shop
+            </Link>
+
+            <Link
+              href="/contact"
+              style={{
+                display: "inline-block",
+                border: "1px solid #e5c4d1",
+                borderRadius: "10px",
+                background: "#fff4f7",
+                padding: "11px 17px",
+                color: "#a65170",
+                fontSize: "12px",
+                fontWeight: 800,
+                textDecoration: "none",
+              }}
+            >
+              Contact Simplyire
+            </Link>
+          </div>
         </div>
       </main>
     );
@@ -123,7 +296,7 @@ export default function OrderSuccessPage() {
       >
         <div
           style={{
-            padding: "42px",
+            padding: "42px 24px",
             borderRadius: "25px",
             background: "#fff",
             border: "1px solid #eedde4",
@@ -181,9 +354,8 @@ export default function OrderSuccessPage() {
               lineHeight: 1.6,
             }}
           >
-            Thank you for shopping with
-            Simplyire Essentials. Your
-            payment has been confirmed.
+            Thank you for shopping with Simplyire Essentials.
+            Your payment has been verified successfully.
           </p>
 
           <div
@@ -198,12 +370,10 @@ export default function OrderSuccessPage() {
             <div
               style={{
                 display: "flex",
-                justifyContent:
-                  "space-between",
+                justifyContent: "space-between",
                 gap: "20px",
                 padding: "15px 17px",
-                borderBottom:
-                  "1px solid #f2e7eb",
+                borderBottom: "1px solid #f2e7eb",
               }}
             >
               <span
@@ -228,12 +398,10 @@ export default function OrderSuccessPage() {
             <div
               style={{
                 display: "flex",
-                justifyContent:
-                  "space-between",
+                justifyContent: "space-between",
                 gap: "20px",
                 padding: "15px 17px",
-                borderBottom:
-                  "1px solid #f2e7eb",
+                borderBottom: "1px solid #f2e7eb",
               }}
             >
               <span
@@ -258,8 +426,7 @@ export default function OrderSuccessPage() {
             <div
               style={{
                 display: "flex",
-                justifyContent:
-                  "space-between",
+                justifyContent: "space-between",
                 gap: "20px",
                 padding: "15px 17px",
               }}
@@ -279,9 +446,7 @@ export default function OrderSuccessPage() {
                   fontSize: "15px",
                 }}
               >
-                {formatNaira(
-                  order.total
-                )}
+                {formatNaira(order.total)}
               </strong>
             </div>
           </div>
@@ -295,8 +460,7 @@ export default function OrderSuccessPage() {
                 wordBreak: "break-all",
               }}
             >
-              Payment reference:{" "}
-              {order.paymentReference}
+              Payment reference: {order.paymentReference}
             </p>
           )}
 

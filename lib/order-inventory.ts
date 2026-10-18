@@ -4,8 +4,8 @@ import { Prisma } from "@/app/generated/prisma/client";
 import { db } from "@/lib/db";
 
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
-
-const PAYSTACK_VERIFY_URL = "https://api.paystack.co/transaction/verify";
+const PAYSTACK_VERIFY_URL =
+  "https://api.paystack.co/transaction/verify";
 
 const DEFAULT_RESERVATION_MINUTES = 30;
 
@@ -38,6 +38,7 @@ type PaystackVerificationResponse = {
     reference?: string;
     amount?: number;
     currency?: string;
+    paid_at?: string | null;
     metadata?: {
       orderId?: string;
       [key: string]: unknown;
@@ -46,18 +47,35 @@ type PaystackVerificationResponse = {
   };
 };
 
-function getReservationExpiry(minutes = DEFAULT_RESERVATION_MINUTES) {
+function getReservationExpiry(
+  minutes = DEFAULT_RESERVATION_MINUTES,
+) {
   return new Date(Date.now() + minutes * 60 * 1000);
 }
 
+function getPaymentDate(
+  value?: string | Date | null,
+): Date {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const parsed = new Date(value);
+
+    if (!Number.isNaN(parsed.getTime())) {
+      return parsed;
+    }
+  }
+
+  return new Date();
+}
+
 /**
- * Reserve inventory when creating an order.
+ * Reserve inventory for an unpaid order.
  *
- * Call this inside your order-creation transaction, if you use this helper
- * in that flow. Do not reserve the same order twice.
- *
- * This helper assumes Product.stock is physical stock and Product.reservedStock
- * is the quantity already reserved by unpaid orders.
+ * Call this inside the order-creation transaction if needed.
+ * Do not reserve the same order twice.
  */
 export async function reserveOrderInventory(
   tx: Prisma.TransactionClient,
@@ -66,7 +84,7 @@ export async function reserveOrderInventory(
 ) {
   const order = await tx.order.findUnique({
     where: { id: orderId },
-    include: { items: true },
+    include: { orderItems: true },
   });
 
   if (!order) {
@@ -78,33 +96,45 @@ export async function reserveOrderInventory(
   }
 
   if (order.inventoryStatus === "COMMITTED") {
-    throw new Error("Inventory has already been committed for this order.");
+    throw new Error(
+      "Inventory has already been committed for this order.",
+    );
   }
 
   if (order.inventoryStatus === "RELEASED") {
-    throw new Error("Inventory reservation has already been released.");
+    throw new Error(
+      "Inventory reservation has already been released.",
+    );
   }
 
   if (order.status !== "PENDING") {
-    throw new Error("Only pending orders can reserve inventory.");
+    throw new Error(
+      "Only pending orders can reserve inventory.",
+    );
   }
 
-  if (order.items.length === 0) {
-    throw new Error("Cannot reserve inventory for an order with no items.");
+  if (order.orderItems.length === 0) {
+    throw new Error(
+      "Cannot reserve inventory for an order with no items.",
+    );
   }
 
-  // Combine duplicate product lines so stock is checked and reserved once
-  // per product.
   const quantities = new Map<string, number>();
 
-  for (const item of order.items) {
-    if (!Number.isInteger(item.quantity) || item.quantity <= 0) {
-      throw new Error("Invalid product quantity in order.");
+  for (const item of order.orderItems) {
+    if (
+      !Number.isInteger(item.quantity) ||
+      item.quantity <= 0
+    ) {
+      throw new Error(
+        "Invalid product quantity in order.",
+      );
     }
 
     quantities.set(
       item.productId,
-      (quantities.get(item.productId) ?? 0) + item.quantity,
+      (quantities.get(item.productId) ?? 0) +
+        item.quantity,
     );
   }
 
@@ -123,37 +153,40 @@ export async function reserveOrderInventory(
     }
   }
 
-  const updated = await tx.order.update({
+  return tx.order.update({
     where: { id: orderId },
     data: {
       inventoryStatus: "RESERVED",
-      reservationExpiresAt: getReservationExpiry(reservationMinutes),
+      reservationExpiresAt:
+        getReservationExpiry(reservationMinutes),
     },
-    include: { items: true },
+    include: { orderItems: true },
   });
-
-  return updated;
 }
 
 /**
  * Commit reserved inventory after Paystack confirms payment.
  *
- * A committed order reduces both physical stock and reservedStock.
- * A previously committed order is returned without deducting stock again.
+ * Physical stock and reserved stock are reduced together.
+ * Already committed orders are returned without deducting stock again.
  */
 export async function settlePaidOrder(
   orderId: string,
   payment: PaymentDetails,
 ) {
-  if (!payment.reference?.trim()) {
-    throw new Error("A valid payment reference is required.");
+  const reference = payment.reference?.trim();
+
+  if (!reference) {
+    throw new Error(
+      "A valid payment reference is required.",
+    );
   }
 
   return db.$transaction(
     async (tx) => {
       const order = await tx.order.findUnique({
         where: { id: orderId },
-        include: { items: true },
+        include: { orderItems: true },
       });
 
       if (!order) {
@@ -162,9 +195,11 @@ export async function settlePaidOrder(
 
       if (
         order.paymentReference &&
-        order.paymentReference !== payment.reference
+        order.paymentReference !== reference
       ) {
-        throw new Error("Payment reference does not match this order.");
+        throw new Error(
+          "Payment reference does not match this order.",
+        );
       }
 
       if (order.inventoryStatus === "RELEASED") {
@@ -181,9 +216,7 @@ export async function settlePaidOrder(
       }
 
       /*
-       * Legacy orders may not have used inventory reservations.
-       * We intentionally avoid deducting stock for them here because doing so
-       * without knowing their previous inventory handling could double-deduct.
+       * Do not deduct stock for legacy orders without a reservation.
        */
       if (order.inventoryStatus === "NONE") {
         if (order.status === "PAID") {
@@ -196,18 +229,22 @@ export async function settlePaidOrder(
       }
 
       if (order.inventoryStatus !== "RESERVED") {
-        throw new Error("Order inventory is not reserved.");
+        throw new Error(
+          "Order inventory is not reserved.",
+        );
       }
 
-      if (order.status !== "PENDING" && order.status !== "PAID") {
+      if (
+        order.status !== "PENDING" &&
+        order.status !== "PAID"
+      ) {
         throw new Error(
           `Cannot settle an order with payment status ${order.status}.`,
         );
       }
 
       /*
-       * Claim the reservation using a conditional update.
-       * If another request has already changed its state, this update fails.
+       * Claim the reservation atomically.
        */
       const claim = await tx.order.updateMany({
         where: {
@@ -218,9 +255,9 @@ export async function settlePaidOrder(
         data: {
           status: "PAID",
           inventoryStatus: "COMMITTED",
-          paymentReference: payment.reference,
+          paymentReference: reference,
           paymentChannel: payment.channel ?? null,
-          paidAt: new Date(),
+          paidAt: getPaymentDate(payment.paidAt),
           reservationExpiresAt: null,
         },
       });
@@ -228,7 +265,7 @@ export async function settlePaidOrder(
       if (claim.count !== 1) {
         const latest = await tx.order.findUnique({
           where: { id: orderId },
-          include: { items: true },
+          include: { orderItems: true },
         });
 
         if (
@@ -243,13 +280,13 @@ export async function settlePaidOrder(
         );
       }
 
-      // Aggregate duplicate product lines before deducting inventory.
       const quantities = new Map<string, number>();
 
-      for (const item of order.items) {
+      for (const item of order.orderItems) {
         quantities.set(
           item.productId,
-          (quantities.get(item.productId) ?? 0) + item.quantity,
+          (quantities.get(item.productId) ?? 0) +
+            item.quantity,
         );
       }
 
@@ -265,7 +302,6 @@ export async function settlePaidOrder(
         `;
 
         if (result !== 1) {
-          // Throwing rolls back the transaction, including the order update.
           throw new Error(
             `Could not commit inventory for product ${productId}.`,
           );
@@ -274,11 +310,13 @@ export async function settlePaidOrder(
 
       const updatedOrder = await tx.order.findUnique({
         where: { id: orderId },
-        include: { items: true },
+        include: { orderItems: true },
       });
 
       if (!updatedOrder) {
-        throw new Error("Order could not be retrieved after settlement.");
+        throw new Error(
+          "Order could not be retrieved after settlement.",
+        );
       }
 
       return updatedOrder;
@@ -291,16 +329,18 @@ export async function settlePaidOrder(
 }
 
 /**
- * Release reserved inventory for an unpaid order.
+ * Release inventory reserved for an unpaid order.
  *
- * This does not reduce physical stock. It only reduces reservedStock.
+ * This reduces reservedStock without reducing physical stock.
  */
-export async function releaseOrderReservation(orderId: string) {
+export async function releaseOrderReservation(
+  orderId: string,
+) {
   return db.$transaction(
     async (tx) => {
       const order = await tx.order.findUnique({
         where: { id: orderId },
-        include: { items: true },
+        include: { orderItems: true },
       });
 
       if (!order) {
@@ -325,7 +365,9 @@ export async function releaseOrderReservation(orderId: string) {
       }
 
       if (order.inventoryStatus !== "RESERVED") {
-        throw new Error("Order inventory is not reserved.");
+        throw new Error(
+          "Order inventory is not reserved.",
+        );
       }
 
       const claim = await tx.order.updateMany({
@@ -344,7 +386,7 @@ export async function releaseOrderReservation(orderId: string) {
       if (claim.count !== 1) {
         const latest = await tx.order.findUnique({
           where: { id: orderId },
-          include: { items: true },
+          include: { orderItems: true },
         });
 
         if (
@@ -361,10 +403,11 @@ export async function releaseOrderReservation(orderId: string) {
 
       const quantities = new Map<string, number>();
 
-      for (const item of order.items) {
+      for (const item of order.orderItems) {
         quantities.set(
           item.productId,
-          (quantities.get(item.productId) ?? 0) + item.quantity,
+          (quantities.get(item.productId) ?? 0) +
+            item.quantity,
         );
       }
 
@@ -385,11 +428,13 @@ export async function releaseOrderReservation(orderId: string) {
 
       const updatedOrder = await tx.order.findUnique({
         where: { id: orderId },
-        include: { items: true },
+        include: { orderItems: true },
       });
 
       if (!updatedOrder) {
-        throw new Error("Order could not be retrieved after release.");
+        throw new Error(
+          "Order could not be retrieved after release.",
+        );
       }
 
       return updatedOrder;
@@ -406,9 +451,13 @@ export async function releaseOrderReservation(orderId: string) {
  */
 async function verifyPaystackPayment(
   reference: string,
-): Promise<PaystackVerificationResponse["data"] | null> {
+): Promise<
+  PaystackVerificationResponse["data"] | null
+> {
   if (!PAYSTACK_SECRET_KEY) {
-    throw new Error("PAYSTACK_SECRET_KEY is not configured.");
+    throw new Error(
+      "PAYSTACK_SECRET_KEY is not configured.",
+    );
   }
 
   const response = await fetch(
@@ -433,7 +482,9 @@ async function verifyPaystackPayment(
     (await response.json()) as PaystackVerificationResponse;
 
   if (!result.status || !result.data) {
-    throw new Error(result.message || "Paystack verification failed.");
+    throw new Error(
+      result.message || "Paystack verification failed.",
+    );
   }
 
   return result.data;
@@ -442,15 +493,18 @@ async function verifyPaystackPayment(
 /**
  * Reconcile expired reservations.
  *
- * For expired orders with a payment reference, verify the transaction with
- * Paystack before releasing inventory. Successful payments are committed;
- * pending payments keep their reservation; failed or abandoned payments
- * release the reservation.
+ * Successful payments are committed.
+ * Failed or abandoned payments release their reservations.
+ * Pending payments keep their reservations.
  */
 export async function reconcileExpiredReservations(
   limit = 10,
 ): Promise<ReconciliationSummary> {
-  const safeLimit = Math.min(Math.max(Math.floor(limit), 1), 100);
+  const safeLimit = Math.min(
+    Math.max(Math.floor(limit), 1),
+    100,
+  );
+
   const now = new Date();
 
   const expiredOrders = await db.order.findMany({
@@ -468,7 +522,6 @@ export async function reconcileExpiredReservations(
     select: {
       id: true,
       total: true,
-      currency: true,
       paymentReference: true,
     },
   });
@@ -487,71 +540,86 @@ export async function reconcileExpiredReservations(
       const reference = order.paymentReference;
 
       /*
-       * If no reference exists, there is no Paystack transaction to verify.
-       * The reservation can be released.
+       * No reference means no transaction is available to verify.
        */
       if (!reference) {
         await releaseOrderReservation(order.id);
 
         summary.released += 1;
+
         summary.results.push({
           orderId: order.id,
           action: "RELEASED",
-          message: "Expired order had no payment reference.",
+          message:
+            "Expired order had no payment reference.",
         });
 
         continue;
       }
 
-      const payment = await verifyPaystackPayment(reference);
+      const payment =
+        await verifyPaystackPayment(reference);
 
       if (!payment) {
         summary.stillPending += 1;
+
         summary.results.push({
           orderId: order.id,
           action: "PENDING",
-          message: "Paystack returned no transaction data.",
+          message:
+            "Paystack returned no transaction data.",
         });
 
         continue;
       }
 
       if (payment.reference !== reference) {
-        throw new Error("Paystack returned a mismatched payment reference.");
+        throw new Error(
+          "Paystack returned a mismatched payment reference.",
+        );
       }
 
       if (
         payment.metadata?.orderId &&
         payment.metadata.orderId !== order.id
       ) {
-        throw new Error("Paystack metadata does not match the order.");
+        throw new Error(
+          "Paystack metadata does not match the order.",
+        );
       }
 
       if (
         typeof payment.amount !== "number" ||
         payment.amount !== order.total * 100
       ) {
-        throw new Error("Paystack amount does not match the order total.");
+        throw new Error(
+          "Paystack amount does not match the order total.",
+        );
       }
 
       if (
         payment.currency &&
         payment.currency.toUpperCase() !== "NGN"
       ) {
-        throw new Error("Paystack currency is not NGN.");
+        throw new Error(
+          "Paystack currency is not NGN.",
+        );
       }
 
       if (payment.status === "success") {
         await settlePaidOrder(order.id, {
           reference,
           channel: payment.channel ?? null,
+          paidAt: payment.paid_at ?? null,
         });
 
         summary.committed += 1;
+
         summary.results.push({
           orderId: order.id,
           action: "COMMITTED",
-          message: "Successful payment verified and inventory committed.",
+          message:
+            "Successful payment verified and inventory committed.",
         });
 
         continue;
@@ -564,6 +632,7 @@ export async function reconcileExpiredReservations(
         await releaseOrderReservation(order.id);
 
         summary.released += 1;
+
         summary.results.push({
           orderId: order.id,
           action: "RELEASED",
@@ -573,15 +642,21 @@ export async function reconcileExpiredReservations(
         continue;
       }
 
-      // Do not release stock for an ongoing transaction.
+      /*
+       * Never release stock while payment is still pending.
+       */
       summary.stillPending += 1;
+
       summary.results.push({
         orderId: order.id,
         action: "PENDING",
-        message: `Paystack transaction status: ${payment.status ?? "unknown"}.`,
+        message: `Paystack transaction status: ${
+          payment.status ?? "unknown"
+        }.`,
       });
     } catch (error) {
       summary.failed += 1;
+
       summary.results.push({
         orderId: order.id,
         action: "FAILED",

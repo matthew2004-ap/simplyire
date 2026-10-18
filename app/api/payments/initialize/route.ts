@@ -3,17 +3,51 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { getSession } from "@/lib/auth";
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 const PAYSTACK_INITIALIZE_URL =
   "https://api.paystack.co/transaction/initialize";
 
-function getSiteUrl() {
-  const siteUrl = process.env.SITE_URL;
+function jsonResponse(
+  body: Record<string, unknown>,
+  status = 200,
+) {
+  return NextResponse.json(body, {
+    status,
+    headers: {
+      "Cache-Control": "no-store, max-age=0",
+    },
+  });
+}
 
-  if (!siteUrl) {
+function getSiteUrl(): string {
+  const configuredUrl = process.env.SITE_URL?.trim();
+
+  if (!configuredUrl) {
     throw new Error("SITE_URL is not configured.");
   }
 
-  return siteUrl.replace(/\/+$/, "");
+  let parsedUrl: URL;
+
+  try {
+    parsedUrl = new URL(configuredUrl);
+  } catch {
+    throw new Error(
+      "SITE_URL must be a valid absolute URL.",
+    );
+  }
+
+  if (
+    parsedUrl.protocol !== "https:" &&
+    parsedUrl.hostname !== "localhost"
+  ) {
+    throw new Error(
+      "SITE_URL must use HTTPS in production.",
+    );
+  }
+
+  return parsedUrl.origin;
 }
 
 export async function POST(request: NextRequest) {
@@ -21,28 +55,46 @@ export async function POST(request: NextRequest) {
     const secretKey = process.env.PAYSTACK_SECRET_KEY;
 
     if (!secretKey) {
-      return NextResponse.json(
+      console.error(
+        "PAYSTACK_SECRET_KEY is not configured.",
+      );
+
+      return jsonResponse(
         {
           success: false,
-          message: "Payment service is not configured.",
+          message:
+            "The payment service is temporarily unavailable.",
         },
-        { status: 500 },
+        500,
       );
     }
 
-    const body = await request.json().catch(() => null);
-    const orderId = body?.orderId;
+    let body: { orderId?: unknown };
+
+    try {
+      body = await request.json();
+    } catch {
+      return jsonResponse(
+        {
+          success: false,
+          message: "Invalid request body.",
+        },
+        400,
+      );
+    }
+
+    const orderId = body.orderId;
 
     if (
       typeof orderId !== "string" ||
       !orderId.trim()
     ) {
-      return NextResponse.json(
+      return jsonResponse(
         {
           success: false,
           message: "A valid order ID is required.",
         },
-        { status: 400 },
+        400,
       );
     }
 
@@ -50,120 +102,161 @@ export async function POST(request: NextRequest) {
 
     const order = await db.order.findUnique({
       where: {
-        id: orderId,
+        id: orderId.trim(),
       },
     });
 
     if (!order) {
-      return NextResponse.json(
+      return jsonResponse(
         {
           success: false,
           message: "Order not found.",
         },
-        { status: 404 },
+        404,
       );
     }
 
-    // If the order belongs to an account, verify ownership.
+    /*
+     * Authenticated orders can only be paid by their owner.
+     * Guest orders remain payable through the checkout flow.
+     */
     if (
       order.userId &&
       (!session || session.userId !== order.userId)
     ) {
-      return NextResponse.json(
+      return jsonResponse(
         {
           success: false,
-          message: "You are not authorized to pay for this order.",
+          message:
+            "You are not authorized to pay for this order.",
         },
-        { status: 403 },
+        403,
       );
     }
 
-    if (order.status === "PAID") {
-      return NextResponse.json(
+    if (
+      order.status === "PAID" &&
+      order.inventoryStatus === "COMMITTED"
+    ) {
+      return jsonResponse(
         {
           success: false,
-          message: "This order has already been paid for.",
+          paid: true,
+          message:
+            "This order has already been paid for.",
+          orderId: order.id,
         },
-        { status: 409 },
+        409,
       );
     }
 
     if (
       order.status !== "PENDING" ||
-      order.inventoryStatus === "RELEASED"
+      order.inventoryStatus === "RELEASED" ||
+      order.inventoryStatus === "COMMITTED"
     ) {
-      return NextResponse.json(
+      return jsonResponse(
         {
           success: false,
           message:
-            "This order is no longer available for payment. Please create a new order.",
+            "This order is no longer available for payment. Please contact support if you believe this is incorrect.",
         },
-        { status: 409 },
+        409,
       );
     }
 
-    // A reserved order must still have an active reservation.
+    /*
+     * Check the reservation before contacting Paystack.
+     */
     if (
       order.inventoryStatus === "RESERVED" &&
-      order.reservationExpiresAt &&
-      order.reservationExpiresAt.getTime() <= Date.now()
+      (
+        !order.reservationExpiresAt ||
+        order.reservationExpiresAt.getTime() <= Date.now()
+      )
     ) {
-      return NextResponse.json(
+      return jsonResponse(
         {
           success: false,
           message:
-            "Your order reservation has expired. Please create a new order.",
+            "Your order reservation has expired. Please contact support before creating another order.",
         },
-        { status: 409 },
+        409,
+      );
+    }
+
+    if (
+      order.inventoryStatus !== "RESERVED" &&
+      order.inventoryStatus !== "NONE"
+    ) {
+      return jsonResponse(
+        {
+          success: false,
+          message:
+            "The order inventory state is invalid for payment.",
+        },
+        409,
       );
     }
 
     if (
       !Number.isSafeInteger(order.total) ||
-      order.total <= 0
+      order.total <= 0 ||
+      order.total > Math.floor(Number.MAX_SAFE_INTEGER / 100)
     ) {
-      return NextResponse.json(
+      return jsonResponse(
         {
           success: false,
           message: "The order total is invalid.",
         },
-        { status: 400 },
+        400,
       );
     }
 
-    if (!order.email?.trim()) {
-      return NextResponse.json(
+    const email = order.email?.trim().toLowerCase();
+
+    if (
+      !email ||
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+    ) {
+      return jsonResponse(
         {
           success: false,
-          message: "The order must have a valid email address.",
+          message:
+            "The order must have a valid email address.",
         },
-        { status: 400 },
+        400,
       );
     }
 
     /*
-     * Do not initialize a second Paystack transaction while the order
-     * already has a payment reference.
+     * Do not create a second transaction for an order that already
+     * has a reference. The old reference must be reconciled first.
      *
-     * This prevents accidentally attaching multiple payment attempts
-     * to the same order. A separate retry flow can be added later.
+     * This avoids creating an untracked payment that could later
+     * succeed after another transaction has been initialized.
      */
     if (order.paymentReference) {
-      return NextResponse.json(
+      return jsonResponse(
         {
           success: false,
+          paid: false,
           message:
-            "A payment attempt already exists for this order. Please verify its status before trying again.",
+            "A payment attempt already exists for this order. Please retry payment verification or contact support before attempting another payment.",
           reference: order.paymentReference,
+          orderId: order.id,
         },
-        { status: 409 },
+        409,
       );
     }
 
-    const reference =
-      `SIMPLYIRE-${order.id}-${Date.now()}`;
-
     const siteUrl = getSiteUrl();
+
+    /*
+     * Create a unique reference for this payment attempt.
+     */
+    const reference =
+      `SIMPLYIRE-${order.id}-${crypto.randomUUID()}`;
 
     const paystackResponse = await fetch(
       PAYSTACK_INITIALIZE_URL,
@@ -175,7 +268,7 @@ export async function POST(request: NextRequest) {
           Accept: "application/json",
         },
         body: JSON.stringify({
-          email: order.email.trim(),
+          email,
           amount: order.total * 100,
           currency: "NGN",
           reference,
@@ -184,10 +277,10 @@ export async function POST(request: NextRequest) {
             orderId: order.id,
             customer: order.customer,
             phone: order.phone,
-            inventoryStatus: order.inventoryStatus,
           },
         }),
         cache: "no-store",
+        signal: AbortSignal.timeout(15000),
       },
     );
 
@@ -197,30 +290,31 @@ export async function POST(request: NextRequest) {
 
     if (
       !paystackResponse.ok ||
-      !result?.status ||
-      !result?.data?.authorization_url
+      result?.status !== true ||
+      typeof result?.data?.authorization_url !== "string" ||
+      !result.data.authorization_url.startsWith("https://")
     ) {
       console.error(
         "Paystack initialization failed:",
-        result,
+        {
+          httpStatus: paystackResponse.status,
+          message: result?.message,
+        },
       );
 
-      return NextResponse.json(
+      return jsonResponse(
         {
           success: false,
           message:
-            result?.message ||
-            "Unable to initialize payment. Please try again.",
+            "We could not initialize your payment. Please retry verification or contact support if a transaction may already have been created.",
         },
-        { status: 502 },
+        502,
       );
     }
 
     /*
-     * Save the reference only if the order is still pending and
-     * does not already have another payment reference.
-     *
-     * This conditional update protects against concurrent requests.
+     * Save the reference only if the order is still eligible
+     * and no other request has claimed a payment reference.
      */
     const updated = await db.order.updateMany({
       where: {
@@ -245,17 +339,33 @@ export async function POST(request: NextRequest) {
     });
 
     if (updated.count !== 1) {
-      return NextResponse.json(
+      /*
+       * Paystack may already have created the transaction.
+       * Do not return its checkout URL unless its reference
+       * has been saved against the correct order.
+       */
+      console.error(
+        "Could not associate the Paystack reference with the order.",
+        {
+          orderId: order.id,
+          reference,
+        },
+      );
+
+      return jsonResponse(
         {
           success: false,
           message:
-            "The order changed while payment was being initialized. Please check the order status before continuing.",
+            "We could not safely attach this payment to your order. Please contact support before attempting another payment.",
         },
-        { status: 409 },
+        409,
       );
     }
 
-    return NextResponse.json({
+    /*
+     * The checkout page expects authorizationUrl at the top level.
+     */
+    return jsonResponse({
       success: true,
       message: "Payment initialized successfully.",
       authorizationUrl:
@@ -269,15 +379,18 @@ export async function POST(request: NextRequest) {
       error,
     );
 
-    return NextResponse.json(
+    const timedOut =
+      error instanceof Error &&
+      error.name === "TimeoutError";
+
+    return jsonResponse(
       {
         success: false,
-        message:
-          error instanceof Error
-            ? error.message
-            : "An unexpected payment error occurred.",
+        message: timedOut
+          ? "The payment request timed out. Check the order's payment status before trying again."
+          : "We could not initialize your payment. Please try again or contact support.",
       },
-      { status: 500 },
+      timedOut ? 504 : 500,
     );
   }
 }
