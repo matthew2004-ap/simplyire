@@ -293,11 +293,11 @@ export async function POST(request: Request) {
       Confirm currency.
     */
     if (
-      transaction.currency &&
-      transaction.currency !== "NGN"
+      typeof transaction.currency !== "string" ||
+      !transaction.currency.trim()
     ) {
       console.error(
-        "Payment currency mismatch:",
+        "Payment currency is missing:",
         {
           orderId: order.id,
           receivedCurrency:
@@ -309,7 +309,7 @@ export async function POST(request: Request) {
         {
           success: false,
           message:
-            "Payment currency does not match the order.",
+            "Payment currency is missing.",
         },
         { status: 400 }
       );

@@ -69,8 +69,11 @@ export async function processExpiredReservations(limit = 50) {
       if (reference !== order.paymentReference) {
         throw new Error("Paystack transaction reference mismatch.");
       }
-      if (transaction.currency && transaction.currency !== "NGN") {
-        throw new Error("Paystack currency does not match NGN.");
+      if (
+        typeof transaction.currency !== "string" ||
+        !transaction.currency.trim()
+      ) {
+        throw new Error("Paystack currency is missing.");
       }
       if (Number(transaction.amount) !== order.total * 100) {
         throw new Error("Paystack amount does not match the order total.");

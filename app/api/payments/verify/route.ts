@@ -231,14 +231,15 @@ export async function GET(request: NextRequest) {
      * Validate the currency.
      */
     if (
-      payment.currency?.toUpperCase() !== "NGN"
+      typeof payment.currency !== "string" ||
+      !payment.currency.trim()
     ) {
       return jsonResponse(
         {
           success: false,
           paid: false,
           message:
-            "The payment currency does not match NGN.",
+            "The payment currency is missing.",
         },
         400,
       );
