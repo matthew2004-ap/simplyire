@@ -4,21 +4,37 @@ import Footer from "@/components/Footer";
 import { CartProvider } from "@/context/CartContext";
 import "./globals.css";
 
+const siteUrl = "https://simplyire.vercel.app";
+
 export const metadata: Metadata = {
+  metadataBase: new URL(siteUrl),
+
   title: {
-    default: "Simplyire Essentials | Self-Care, Beauty & Everyday Essentials",
+    default: "Simplyire Essentials | Beauty & Self-Care",
     template: "%s | Simplyire Essentials",
   },
+
   description:
-    "Your one-stop shop for girly essentials, self-care, beauty, bags and accessories.",
-  keywords: [
-    "Simplyire Essentials",
-    "beauty",
-    "self-care",
-    "bags",
-    "accessories",
-    "Nigeria",
-  ],
+    "Shop beauty products, skincare, fragrances, lip care, bags and accessories at Simplyire Essentials.",
+
+  alternates: {
+    canonical: "/",
+  },
+
+  openGraph: {
+    type: "website",
+    url: siteUrl,
+    siteName: "Simplyire Essentials",
+    title: "Simplyire Essentials | Beauty & Self-Care",
+    description:
+      "Discover beauty, self-care, fragrances, bags and accessories at Simplyire Essentials.",
+    locale: "en_NG",
+  },
+
+  robots: {
+    index: true,
+    follow: true,
+  },
 };
 
 export default function RootLayout({
@@ -29,9 +45,7 @@ export default function RootLayout({
       <body>
         <CartProvider>
           <Navbar />
-
           <div className="site-main">{children}</div>
-
           <Footer />
         </CartProvider>
       </body>
