@@ -89,7 +89,7 @@ The application stores image URLs, not image files. Use product/lifestyle images
 ## Production notes
 
 - Configure production environment variables in Vercel and apply outstanding Prisma migrations to the intended production database before relying on the new features.
-- Add the Paystack webhook URL `https://YOUR-DOMAIN/api/payments/webhook` to the matching Paystack environment. Use test credentials for staging and live credentials only when formally ready to accept real payments.
+- Add the Paystack webhook URL `https://simplyire.vercel.app/api/payments/webhook` to the matching Paystack environment. Use test credentials for staging and live credentials only when formally ready to accept real payments.
 - The included Vercel cron is scheduled daily for compatibility with Hobby plans. Expired reservations are also swept opportunistically during catalog/order traffic. Pro/Enterprise projects can change the schedule to a shorter interval and redeploy if desired.
 - Review the privacy, terms and returns pages and replace them with policies approved for your actual business. Confirm your real support email, WhatsApp and social URLs. Check product names, photos, price, stock, delivery fee and delivery timing before launch.
 - Test with a staging database and Paystack test mode before using live payment keys.

@@ -4,7 +4,11 @@ import Footer from "@/components/Footer";
 import { CartProvider } from "@/context/CartContext";
 import "./globals.css";
 
-const siteUrl = "https://simplyire.vercel.app";
+const siteUrl = (
+  process.env.NEXT_PUBLIC_SITE_URL ||
+  process.env.SITE_URL ||
+  "https://simplyire.vercel.app"
+).replace(/\/+$/, "");
 
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
@@ -16,6 +20,10 @@ export const metadata: Metadata = {
 
   description:
     "Shop beauty products, skincare, fragrances, lip care, bags and accessories at Simplyire Essentials.",
+
+  verification: {
+    google: "KrTTH6r6LGM0qdo32L43t79k2oapuOhzyWOXJcLxZMU",
+  },
 
   alternates: {
     canonical: "/",

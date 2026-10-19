@@ -182,7 +182,7 @@ A local website is not a public webhook target. The customer callback can verify
 After deploying, enter this endpoint in the matching Paystack dashboard environment:
 
 ```text
-https://YOUR-VERCEL-DOMAIN/api/payments/webhook
+https://simplyire.vercel.app/api/payments/webhook
 ```
 
 Keep the signed webhook validation enabled. Do not use a test secret with live payments or a live secret in development. Make sure `SITE_URL` uses your actual deployed HTTPS domain so the Paystack callback points back to the correct site.
@@ -237,8 +237,8 @@ Import the GitHub repository into Vercel. In **Project → Settings → Environm
 
 - `DATABASE_URL` — production PostgreSQL connection string
 - `AUTH_SECRET` — strong private random secret
-- `SITE_URL` — `https://YOUR-VERCEL-DOMAIN`
-- `NEXT_PUBLIC_SITE_URL` — `https://YOUR-VERCEL-DOMAIN`
+- `SITE_URL` — `https://simplyire.vercel.app`
+- `NEXT_PUBLIC_SITE_URL` — `https://simplyire.vercel.app`
 - `PAYSTACK_SECRET_KEY` — test key for staging, live key only when ready for real payments
 - `CRON_SECRET` — a separate strong random secret
 - Optional `NEXT_PUBLIC_CONTACT_EMAIL`, `NEXT_PUBLIC_INSTAGRAM_URL`, `NEXT_PUBLIC_TIKTOK_URL`, `NEXT_PUBLIC_WHATSAPP_URL`
